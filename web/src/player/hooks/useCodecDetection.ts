@@ -129,10 +129,11 @@ export async function probeHDR10PlaybackSupport(): Promise<HDR10PlaybackSupport>
   if (typeof navigator === "undefined" || !navigator.mediaCapabilities) {
     return { hevc: false, av1: false };
   }
+  const mediaCapabilities = navigator.mediaCapabilities;
 
   const probe = async (configuration: MediaDecodingConfiguration): Promise<boolean> => {
     try {
-      const result = await navigator.mediaCapabilities.decodingInfo(configuration);
+      const result = await mediaCapabilities.decodingInfo(configuration);
       return result.supported && result.smooth;
     } catch {
       return false;
