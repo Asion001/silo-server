@@ -58,12 +58,23 @@ describe("probeWebCapabilities", () => {
     vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
     vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("high") }));
 
-    await expect(probeHDR10PlaybackSupport()).resolves.toBe(true);
+    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({ hevc: true, av1: true });
     expect(decodingInfo).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "file",
         video: expect.objectContaining({
           contentType: 'video/mp4; codecs="hvc1.2.4.L153.B0"',
+          colorGamut: "rec2020",
+          transferFunction: "pq",
+          hdrMetadataType: "smpteSt2086",
+        }),
+      }),
+    );
+    expect(decodingInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "file",
+        video: expect.objectContaining({
+          contentType: 'video/mp4; codecs="av01.0.12M.10.0.110.09.16.09.0"',
           colorGamut: "rec2020",
           transferFunction: "pq",
           hdrMetadataType: "smpteSt2086",
@@ -82,7 +93,17 @@ describe("probeWebCapabilities", () => {
     vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
     vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("high") }));
 
-    await expect(probeHDR10PlaybackSupport()).resolves.toBe(false);
+    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({ hevc: false, av1: false });
+  });
+
+  it("accepts AV1 Main10 HDR10 when HEVC is unavailable", async () => {
+    const decodingInfo = vi.fn().mockImplementation((configuration: MediaDecodingConfiguration) => {
+      const supported = configuration.video?.contentType.includes("av01") ?? false;
+      return Promise.resolve({ supported, smooth: supported, powerEfficient: supported });
+    });
+    vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
+
+    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({ hevc: false, av1: true });
   });
 
   // Safari 26 reports `dynamic-range: standard` on XDR panels, and browsers
@@ -97,7 +118,7 @@ describe("probeWebCapabilities", () => {
     vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
     vi.stubGlobal("matchMedia", () => ({ matches: false }));
 
-    await expect(probeHDR10PlaybackSupport()).resolves.toBe(true);
+    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({ hevc: true, av1: true });
     expect(decodingInfo).toHaveBeenCalled();
   });
 
@@ -236,7 +257,7 @@ describe("probeWebCapabilities", () => {
       hdr10_max_bitrate_kbps: 80_000,
     });
     expect(result.current.codecsVideo).not.toContain("hevc");
-    expect(result.current.progressiveCodecsVideo).toContain("hevc");
+    expect(result.current.progressiveCodecsVideo).toEqual(expect.arrayContaining(["hevc", "av1"]));
     expect(result.current.settled).toBe(true);
     unmount();
   });
@@ -254,7 +275,7 @@ describe("probeWebCapabilities", () => {
     const { result, unmount } = renderHook(() => useCodecDetection());
     await act(async () => Promise.resolve());
 
-    expect(decodingInfo).toHaveBeenCalledTimes(1);
+    expect(decodingInfo).toHaveBeenCalledTimes(2);
     expect(result.current.settled).toBe(true);
     expect(result.current.hdrDetails.hdr10).toBe(true);
     unmount();
