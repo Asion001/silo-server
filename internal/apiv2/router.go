@@ -102,6 +102,14 @@ type Dependencies struct {
 	WatchTogetherPolicy             WatchTogetherPolicyService
 	WatchTogetherJoin               WatchTogetherJoinService
 	WatchTogetherSelection          WatchTogetherSelectionService
+	WatchTogetherSourceFallback     WatchTogetherSourceFallbackService
+	WatchTogetherStage              WatchTogetherStageService
+	WatchTogetherStart              WatchTogetherStartService
+	WatchTogetherStop               WatchTogetherStopService
+	WatchTogetherSelectionMode      WatchTogetherSelectionModeService
+	WatchTogetherMemberState        WatchTogetherMemberStateService
+	WatchTogetherPicker             WatchTogetherPickerService
+	WatchTogetherCapability         WatchTogetherCapabilityService
 	WatchTogetherSuggestions        WatchTogetherSuggestionService
 	AdminSectionSettingsWrite       AdminSectionSettingsWriteService
 	AdminDashboardStats             AdminDashboardStatsService
@@ -134,6 +142,9 @@ type Dependencies struct {
 	AdminLogsSocket                 AdminLogsSocketService
 	PlaybackControlSocket           PlaybackControlSocketService
 	EventsCapability                EventsCapabilityService
+	NetworkAccess                   NetworkAccessService
+	ServerIdentity                  ServerIdentityService
+	ServerConnections               ServerConnections
 	NotificationDestinationCreate   NotificationDestinationCreateService
 	AdminUnmatchedFiles             AdminUnmatchedFilesService
 	AdminCatalogImages              AdminCatalogImagesService
@@ -1056,7 +1067,7 @@ type MetadataAIService interface {
 // PeopleService is the slice of *handlers.PeopleHandler the people
 // operations use.
 type PeopleService interface {
-	SearchPeople(ctx context.Context, query string, limit int) ([]handlers.PersonView, error)
+	SearchPeopleScoped(ctx context.Context, query string, limit int, mediaScope string, filter mediacatalog.AccessFilter) ([]handlers.PersonView, error)
 	Person(ctx context.Context, id int64) (handlers.PersonView, error)
 	RefreshPerson(ctx context.Context, userID int, id int64) error
 }
