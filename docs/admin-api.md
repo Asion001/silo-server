@@ -184,11 +184,37 @@ or reverse proxy access. This records the prepared route, not a live measurement
 of every media request or an inference from the client's IP address. Provider
 display names come from `/api/v2/network-access/capabilities`.
 
+`stream_location` on each v2 admin session row reports `local` or `remote` using
+the same trusted client-IP and provider-path classification as the bitrate
+policy. Private, loopback, and link-local clients on the default path are local;
+provider paths and public or unknown client addresses are remote. The web
+Activity panel shows this separately from the access-network badge.
+`GET /api/v2/admin/sessions/capabilities` advertises `stream_location` for client
+feature detection. The displayed location is fixed at playback negotiation,
+even if a later media request arrives over another network path.
+
 The web activity views show that network alongside the named execution and egress
 nodes. API egress is labeled "API server"; its reporting identity remains in the
 tooltip. Native and Jellyfin-compatible playback both populate the route, including
 session recovery. This additive admin observation does not change Apple, Android,
 or Jellyfin playback contracts; those clients need no changes to report it.
+
+`effective_play_method` is the server's whole-session classification:
+`direct` (Direct Play), `remux` (copied audio and video in a streaming
+container), `direct_stream` (copied video with converted audio), or `transcode`
+(converted video). Unknown decisions omit the field, and the capability's
+`effective_play_method_values` lists the vocabulary. The frozen `/api/v1`
+bridge keeps reporting its alpha `audio` value instead of `direct_stream`.
+Per-stream Copy means no re-encoding; it does not promise byte-identical packets
+after a permitted bitstream transformation.
+
+`output_format: true` on the same capability response advertises optional
+`output_container` and `output_protocol` fields on v2 session rows. The serving
+transport reports the container (`fmp4`, `mpegts`, or the source container for
+Direct Play) separately from the protocol (`hls` or `http`). An older node can
+omit both; clients then show the output as unknown rather than inferring it
+from `play_method`, the source container, or the video codec. The frozen
+`/api/v1` bridge does not carry these fields.
 
 `silo_playback_routing_decisions_total` counts routing outcomes with bounded
 `workload`, `execution`, `egress`, `outcome`, and `reason` labels. It never
@@ -1498,7 +1524,9 @@ The personal projection always reports `cancelable: false`: this surface has no 
 command. Existing administrator cancellation can appear as nonterminal `canceling`
 until the worker acknowledges it, then terminal `cancelled`. Both personal and admin
 monitors replace persisted diagnostic errors, warnings, and unmatched reasons with safe
-summaries. Run credentials and private dispatch metadata never appear in these responses.
+summaries. Known diagnostics map to a fixed summary of their cause, such as an item with
+no provider ID or a show missing from the library; anything else reads as a generic
+summary. Run credentials and private dispatch metadata never appear in these responses.
 
 New queued personal imports survive server restart. Source changes invalidate captured
 configuration without retargeting the import; stale running executions fail without replay.

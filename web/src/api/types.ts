@@ -2315,6 +2315,8 @@ export interface AccessGroup {
   audio_transcode_allowed: boolean;
   max_streams: number;
   max_transcodes: number;
+  max_remote_stream_bitrate_kbps: number;
+  max_local_stream_bitrate_kbps: number;
   allowed_permissions: string[] | null;
   requests_allowed: boolean;
   is_default: boolean;
@@ -2334,6 +2336,8 @@ export interface AccessGroupInput {
   audio_transcode_allowed?: boolean;
   max_streams?: number;
   max_transcodes?: number;
+  max_remote_stream_bitrate_kbps?: number;
+  max_local_stream_bitrate_kbps?: number;
   allowed_permissions?: string[] | null;
   requests_allowed?: boolean;
   is_default?: boolean;
@@ -2347,6 +2351,8 @@ export interface AdminUserEffectivePolicy {
   max_playback_quality: string;
   max_streams: number;
   max_transcodes: number;
+  max_remote_stream_bitrate_kbps: number;
+  max_local_stream_bitrate_kbps: number;
   transcode_allowed: boolean;
   audio_transcode_allowed: boolean;
   download_allowed: boolean;
@@ -2367,6 +2373,8 @@ export interface AdminUser {
   max_playback_quality: string | null;
   max_streams: number | null;
   max_transcodes: number | null;
+  max_remote_stream_bitrate_kbps: number | null;
+  max_local_stream_bitrate_kbps: number | null;
   transcode_allowed: boolean | null;
   audio_transcode_allowed: boolean | null;
   max_profiles: number;
@@ -2392,6 +2400,8 @@ export interface CreateUserRequest {
   max_playback_quality?: string;
   max_streams?: number;
   max_transcodes?: number;
+  max_remote_stream_bitrate_kbps?: number;
+  max_local_stream_bitrate_kbps?: number;
   transcode_allowed?: boolean;
   audio_transcode_allowed?: boolean;
   max_profiles?: number;
@@ -2415,6 +2425,8 @@ export interface UpdateUserRequest {
   max_playback_quality?: string | null;
   max_streams?: number | null;
   max_transcodes?: number | null;
+  max_remote_stream_bitrate_kbps?: number | null;
+  max_local_stream_bitrate_kbps?: number | null;
   transcode_allowed?: boolean | null;
   audio_transcode_allowed?: boolean | null;
   max_profiles?: number;
@@ -2490,6 +2502,8 @@ export interface AdminSession {
   is_paused: boolean;
   has_playback_control?: boolean;
   client_ip?: string;
+  /** Server classification used to select the local or remote stream bitrate policy. */
+  stream_location?: "local" | "remote";
   client_name?: string;
   client_version?: string;
   client_build?: string;
@@ -2511,6 +2525,8 @@ export interface AdminSession {
   transcode_hw_accel?: string;
   tone_map_mode?: string;
   source_container?: string;
+  output_container?: string;
+  output_protocol?: string;
   source_bitrate_kbps: number | null;
   source_video_codec?: string;
   source_video_resolution?: string;
@@ -2523,7 +2539,7 @@ export interface AdminSession {
   requested_video_resolution?: string;
   video_decision?: string;
   audio_decision?: string;
-  /** Server-computed activity bucket: direct | remux | transcode | audio.
+  /** Server-computed activity bucket: direct | remux | direct_stream | transcode.
    * Absent when the per-stream decisions are unknown. */
   effective_play_method?: string;
   /** Server-side identification of Jellyfin-ecosystem clients (the JF pill). */

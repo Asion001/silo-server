@@ -680,6 +680,7 @@ func (m *TranscodeManager) reconstructSession(ctx context.Context, sessionID str
 		TranscodeNodeURL:       card.TranscodeNodeURL,
 		TranscodeTransportID:   card.TranscodeTransportID,
 		RoutingNetworkProvider: card.RoutingNetworkProvider,
+		StreamLocation:         card.StreamLocation,
 		RoutingWorkload:        card.RoutingWorkload,
 		RoutingExecution:       card.RoutingExecution,
 		RoutingExecutionNodeID: card.RoutingExecutionNodeID,
@@ -710,6 +711,12 @@ func (m *TranscodeManager) reconstructSession(ctx context.Context, sessionID str
 		SubtitleTrackIndex: card.SubtitleTrackIndex,
 		SubtitleBurnIn:     card.SubtitleBurnIn,
 		SegmentDuration:    card.SegmentDuration,
+	}
+	if card.IsTranscodeRecipe() {
+		s.OutputContainer = HLSOutputContainer(card.TranscodeOpts("", "", nil))
+		s.OutputProtocol = OutputProtocolHLS
+	} else if method == PlayRemux {
+		s.OutputContainer, s.OutputProtocol = OutputContainerFMP4, OutputProtocolHTTP
 	}
 	// Enforce the same per-user concurrency caps a fresh StartSession would, so a
 	// replayed token cannot reconstruct past the user's limit. Reconstructing the

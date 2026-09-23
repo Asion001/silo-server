@@ -5188,7 +5188,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** One person; viewing queues a provider refresh when one is due. */
+    /** One person; viewing queues a provider refresh when one is due, unless the read is a prefetch. */
     get: operations["getPerson"];
     put?: never;
     post?: never;
@@ -10350,7 +10350,17 @@ export interface components {
       id: string;
       is_default: boolean;
       library_ids: string[] | null;
+      /**
+       * Format: int64
+       * @description Local per-stream bitrate ceiling in kbps; 0 means unlimited
+       */
+      max_local_stream_bitrate_kbps: number;
       max_playback_quality: string;
+      /**
+       * Format: int64
+       * @description Remote per-stream bitrate ceiling in kbps; 0 means unlimited
+       */
+      max_remote_stream_bitrate_kbps: number;
       /** Format: int64 */
       max_streams: number;
       /** Format: int64 */
@@ -10372,7 +10382,11 @@ export interface components {
       download_transcode_allowed?: boolean;
       is_default?: boolean;
       library_ids?: string[] | null;
+      /** Format: int64 */
+      max_local_stream_bitrate_kbps?: number;
       max_playback_quality?: string;
+      /** Format: int64 */
+      max_remote_stream_bitrate_kbps?: number;
       /** Format: int64 */
       max_streams?: number;
       /** Format: int64 */
@@ -10399,7 +10413,17 @@ export interface components {
       id: string;
       is_default: boolean;
       library_ids: string[] | null;
+      /**
+       * Format: int64
+       * @description Local per-stream bitrate ceiling in kbps; 0 means unlimited
+       */
+      max_local_stream_bitrate_kbps: number;
       max_playback_quality: string;
+      /**
+       * Format: int64
+       * @description Remote per-stream bitrate ceiling in kbps; 0 means unlimited
+       */
+      max_remote_stream_bitrate_kbps: number;
       /** Format: int64 */
       max_streams: number;
       /** Format: int64 */
@@ -10444,9 +10468,13 @@ export interface components {
       download_transcode_allowed?: boolean | null;
       email: string;
       library_ids?: string[] | null;
+      /** Format: int64 */
+      max_local_stream_bitrate_kbps?: number | null;
       max_playback_quality?: string | null;
       /** Format: int64 */
       max_profiles?: number;
+      /** Format: int64 */
+      max_remote_stream_bitrate_kbps?: number | null;
       /** Format: int64 */
       max_streams?: number | null;
       /** Format: int64 */
@@ -10494,9 +10522,13 @@ export interface components {
       email?: string;
       enabled?: boolean;
       library_ids?: string[] | null;
+      /** Format: int64 */
+      max_local_stream_bitrate_kbps?: number | null;
       max_playback_quality?: string | null;
       /** Format: int64 */
       max_profiles?: number;
+      /** Format: int64 */
+      max_remote_stream_bitrate_kbps?: number | null;
       /** Format: int64 */
       max_streams?: number | null;
       /** Format: int64 */
@@ -13213,6 +13245,7 @@ export interface components {
       client_user_agent?: string;
       client_version?: string;
       content_id?: string;
+      /** @description Whole-session method: direct, remux, direct_stream (copied video, converted audio) or transcode; absent when unknown */
       effective_play_method?: string;
       episode_name?: string;
       /** Format: int64 */
@@ -13230,6 +13263,10 @@ export interface components {
       media_title: string;
       media_type: string;
       node_display_name?: string;
+      /** @description Container the serving transport produces: fmp4, mpegts, or the source container for direct play. Absent when the node did not report it; clients must not infer it from play_method or the source. */
+      output_container?: string;
+      /** @description Delivery protocol, hls or http, independent of the container. Absent when the node did not report it. */
+      output_protocol?: string;
       play_method: string;
       /** Format: double */
       position_seconds: number;
@@ -13283,6 +13320,11 @@ export interface components {
       started_at: string;
       /** Format: int64 */
       stream_bitrate_kbps: number | null;
+      /**
+       * @description Local or remote classification used by the server bitrate policy.
+       * @enum {string}
+       */
+      stream_location: "local" | "remote";
       /** Format: int64 */
       target_audio_channels?: number;
       target_audio_codec?: string;
@@ -13318,6 +13360,8 @@ export interface components {
       network_access_route: boolean;
       node_observations: boolean;
       node_routing: boolean;
+      /** @description Rows may carry output_container and output_protocol */
+      output_format: boolean;
       /** @description Opaque revision of this document */
       revision: string;
       /**
@@ -13325,6 +13369,7 @@ export interface components {
        * @enum {string}
        */
       state: "available" | "disabled" | "not_configured" | "unsupported";
+      stream_location: boolean;
       summary: boolean;
       target_audio_channels: boolean;
       tone_map_mode: boolean;
@@ -15287,6 +15332,12 @@ export interface components {
        */
       library_ids: string[] | null;
       /**
+       * Format: int64
+       * @description Local per-stream bitrate override in kbps; null inherits, 0 means unlimited
+       * @example 0
+       */
+      max_local_stream_bitrate_kbps: number | null;
+      /**
        * @description Playback ceiling override; null inherits, empty string means no ceiling
        * @example 1080p
        */
@@ -15297,6 +15348,12 @@ export interface components {
        * @example 5
        */
       max_profiles: number;
+      /**
+       * Format: int64
+       * @description Remote per-stream bitrate override in kbps; null inherits, 0 means unlimited
+       * @example 0
+       */
+      max_remote_stream_bitrate_kbps: number | null;
       /**
        * Format: int64
        * @description Stream limit override; null inherits, 0 means unlimited
@@ -16333,6 +16390,8 @@ export interface components {
       max_sessions_per_account?: number;
       /** @description People search accepts media_scope and filters credits by viewer access */
       people_media_scope?: boolean;
+      /** @description Person reads accept prefetch=true for speculative reads that do not queue a provider refresh */
+      person_prefetch?: boolean;
       /** @enum {string} */
       provider?: "postgres" | "meilisearch";
       /**
@@ -17971,10 +18030,22 @@ export interface components {
        */
       library_ids: string[] | null;
       /**
+       * Format: int64
+       * @description Local per-stream bitrate limit in kbps; 0 means unlimited
+       * @example 0
+       */
+      max_local_stream_bitrate_kbps: number;
+      /**
        * @description Playback ceiling; empty means none
        * @example 1080p
        */
       max_playback_quality: string;
+      /**
+       * Format: int64
+       * @description Remote per-stream bitrate limit in kbps; 0 means unlimited
+       * @example 0
+       */
+      max_remote_stream_bitrate_kbps: number;
       /**
        * Format: int64
        * @description Concurrent stream limit; 0 means unlimited
@@ -18763,7 +18834,7 @@ export interface components {
       jellyfin_password?: string;
       /** @description Jellyfin: the user name */
       jellyfin_username?: string;
-      /** @description Emby: the source server password when importing from a configured source */
+      /** @description Emby: the source server password when importing from a configured source; empty for an account without one */
       password?: string;
       /** @description Plex: the plex.tv account token, for watchlist import alongside a server token */
       plex_account_token?: string;
@@ -21580,7 +21651,7 @@ export interface components {
        */
       content_id: string;
       /**
-       * @description Bucketed method: direct, remux, transcode or audio; empty when unknown
+       * @description Bucketed method: direct, remux, direct_stream or transcode; empty when unknown
        * @example direct
        */
       effective_play_method: string;
@@ -24064,6 +24135,12 @@ export interface components {
       items: components["schemas"]["SkippedRoot"][];
       /** @description Cursor state; absent for bounded unpaginated collections */
       page?: components["schemas"]["PageInfo"];
+      /**
+       * Format: int64
+       * @description Skipped roots matching the filter across every page
+       * @example 1
+       */
+      total: number;
     };
     StaleMediaID: {
       /** @example movie:heat-1995 */
@@ -24106,6 +24183,12 @@ export interface components {
       items: components["schemas"]["StaleMediaID"][];
       /** @description Cursor state; absent for bounded unpaginated collections */
       page?: components["schemas"]["PageInfo"];
+      /**
+       * Format: int64
+       * @description Stale identifiers matching the filter across every page
+       * @example 1
+       */
+      total: number;
     };
     StartDeviceLoginInputBody: {
       /**
@@ -72978,7 +73061,10 @@ export interface operations {
   };
   getPerson: {
     parameters: {
-      query?: never;
+      query?: {
+        /** @description Marks a speculative read, such as warming a cache for a cast list. The read does not queue a provider refresh. */
+        prefetch?: boolean;
+      };
       header: {
         /** @description The household profile acting for this request; it must belong to the authenticated account. */
         "X-Profile-Id": string;

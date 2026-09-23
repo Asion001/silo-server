@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/mediaprobe"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -1507,13 +1508,75 @@ type recordingSessionSyncer struct {
 	calls           int
 	lastCtxErr      error
 	lastHadDeadline bool
+	onSync          func()
 }
 
 func (s *recordingSessionSyncer) SyncNow(ctx context.Context) error {
 	s.calls++
 	s.lastCtxErr = ctx.Err()
 	_, s.lastHadDeadline = ctx.Deadline()
+	if s.onSync != nil {
+		s.onSync()
+	}
 	return nil
+}
+
+type outputFormatTestSessionManager struct {
+	*testCompatSessionManager
+}
+
+func (m *outputFormatTestSessionManager) SetOutputFormat(id, container, protocol string) error {
+	session, err := m.GetSession(id)
+	if err != nil {
+		return err
+	}
+	session.OutputContainer, session.OutputProtocol = container, protocol
+	return nil
+}
+
+func TestHandleVideoStreamSyncsChangedRemuxOutputFormat(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		t.Run(fmt.Sprintf("direct_%t", direct), func(t *testing.T) {
+			handler, routeID, directBody := newStaticDirectPlayHandler(t)
+			source := testCompatSource(handler.codec, testCompatVersion())
+			source.SupportsDirectPlay, source.SupportsDirectStream = direct, true
+			method := "remux"
+			wantBody := "remuxed"
+			if direct {
+				method, wantBody = "direct", directBody
+			} else {
+				handler.FFmpegPath, _, _ = writeCompatAudioRecipeFFmpeg(t, false, wantBody)
+			}
+			mgr := &outputFormatTestSessionManager{&testCompatSessionManager{sessions: map[string]*playback.Session{
+				"upstream-1": {ID: "upstream-1", PlayMethod: playback.PlayMethod(method), BasePlayMethod: playback.PlayMethod(method)},
+			}}}
+			handler.sessionMgr = mgr
+			handler.playbackStore.Put(PlaybackSession{
+				ID: "play-1", CompatToken: "token-1", RouteItemID: routeID,
+				UpstreamSessionID: "upstream-1", UpstreamPlayMethod: method, MediaSources: []PlaybackMediaSource{source},
+			})
+			syncer := &recordingSessionSyncer{onSync: func() {
+				session, _ := mgr.GetSession("upstream-1")
+				if session.OutputContainer != playback.OutputContainerFMP4 || session.OutputProtocol != playback.OutputProtocolHTTP {
+					t.Fatal("immediate admin sync ran before the remux output format was recorded")
+				}
+			}}
+			handler.SessionSyncer = syncer
+			for range 2 {
+				rec := serveCompatVideoStream(handler, routeID, "PlaySessionId=play-1&MediaSourceId="+url.QueryEscape(source.ID), false)
+				if rec.Code != http.StatusOK || rec.Body.String() != wantBody {
+					t.Fatalf("stream = %d %q, want 200 %q", rec.Code, rec.Body.String(), wantBody)
+				}
+				wantCalls := 1
+				if direct {
+					wantCalls = 0
+				}
+				if syncer.calls != wantCalls {
+					t.Fatalf("admin sync calls = %d, want %d; unchanged requests must not flush again", syncer.calls, wantCalls)
+				}
+			}
+		})
+	}
 }
 
 // TestHandleSessionPlayingStopped_TearsDownAndSyncsImmediately verifies the
@@ -1627,5 +1690,27 @@ func TestEnsureUpstreamPlayback_SyncsOnNewSession(t *testing.T) {
 	}
 	if syncer.calls != 1 {
 		t.Fatalf("SyncNow calls after reuse = %d; want 1", syncer.calls)
+	}
+}
+
+func TestEnsureUpstreamPlayback_KeepsNegotiatedStreamLocation(t *testing.T) {
+	store := NewPlaybackSessionStore(time.Hour, nil)
+	store.Put(PlaybackSession{ID: "ps-location", CompatToken: "tok"})
+	manager := playback.NewSessionManager(0, 0)
+	h := &PlaybackHandler{playbackStore: store, sessionMgr: manager}
+	source := PlaybackMediaSource{ID: "source", FileID: 42, StreamLocation: "remote"}
+	// The media request is local, but PlaybackInfo selected the remote policy.
+	ctx := clientip.SetContext(t.Context(), "192.168.1.8")
+	playSession, err := h.ensureUpstreamPlayback(ctx, &Session{Token: "tok", StreamAppUserID: 7, ProfileID: "profile"}, "ps-location", source, "direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream, err := manager.GetSession(playSession.UpstreamSessionID)
+	if err != nil || upstream.StreamLocation != "remote" || upstream.ClientIP != "192.168.1.8" {
+		t.Fatalf("upstream policy location = %v, err = %v", upstream, err)
+	}
+	card := h.upstreamRecipeCard(playSession, &Session{StreamAppUserID: 7, ProfileID: "profile"}, source, "direct")
+	if card.StreamLocation != "remote" {
+		t.Fatalf("reconstruction location = %q", card.StreamLocation)
 	}
 }
