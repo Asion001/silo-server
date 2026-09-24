@@ -977,16 +977,6 @@ func collectOrphanIDs(ctx context.Context, tx pgx.Tx, contentIDs []string) ([]st
 	return ids, rows.Err()
 }
 
-// collectImageDirs returns S3 directory prefixes for images belonging to the
-// given content IDs that are not still referenced by other surviving content.
-func collectImageDirs(ctx context.Context, q rowQuerier, contentIDs []string) ([]string, error) {
-	dirs, err := collectRawImageDirs(ctx, q, contentIDs)
-	if err != nil {
-		return nil, err
-	}
-	return filterUnreferencedImageDirs(ctx, q, dirs, contentIDs)
-}
-
 // collectRawImageDirs returns the deduped S3 directory prefixes referenced by
 // the given content IDs (items, their seasons, and their episodes), without
 // filtering out dirs still used by other content.
@@ -1099,6 +1089,25 @@ func (r *FolderRepository) DistinctLibraryPaths(ctx context.Context) ([]string, 
 		paths = append(paths, path)
 	}
 	return paths, rows.Err()
+}
+
+// DistinctTypes returns the media_folders.type value of every library, once
+// each, whether or not the library is enabled.
+func (r *FolderRepository) DistinctTypes(ctx context.Context) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `SELECT DISTINCT type FROM media_folders`)
+	if err != nil {
+		return nil, fmt.Errorf("querying library types: %w", err)
+	}
+	defer rows.Close()
+	var types []string
+	for rows.Next() {
+		var libraryType string
+		if err := rows.Scan(&libraryType); err != nil {
+			return nil, fmt.Errorf("scanning library type: %w", err)
+		}
+		types = append(types, libraryType)
+	}
+	return types, rows.Err()
 }
 
 // UpdateLastScanned sets the last_scanned_at timestamp for the given folder.

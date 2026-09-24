@@ -74,6 +74,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/serveridentity"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
+	"github.com/Silo-Server/silo-server/internal/storagetransition"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	subtitleai "github.com/Silo-Server/silo-server/internal/subtitles/ai"
@@ -231,6 +232,7 @@ type Dependencies struct {
 	v2RouteSnapshot        func([]streamtelemetry.WalkedRoute)
 	OnServerSettingUpdated func(ctx context.Context, key, value string)
 	RequestServerRestart   func(ctx context.Context) error
+	StorageTransition      *storagetransition.Service
 	ServerRestartStatus    *handlers.ServerRestartStatusTracker
 
 	// UserCollectionSync handles per-profile imported collections (TMDB /
@@ -419,6 +421,8 @@ func newChiRouter(deps Dependencies) chi.Router {
 	if deps.DB != nil {
 		settingsRepo = catalog.NewEncryptedSettingsRepo(catalog.NewServerSettingsRepo(deps.DB), deps.SecretCipher)
 	}
+	// One reader for access.unrated_content shared by every resolver built here.
+	unratedContent := config.NewUnratedContentPolicy(settingsRepo)
 	var accessGroupStore *access.GroupStore
 	if deps.DB != nil {
 		accessGroupStore = access.NewGroupStore(deps.DB)
@@ -534,10 +538,10 @@ func newChiRouter(deps Dependencies) chi.Router {
 		authMiddleware = apimw.NewAuthMiddleware(jwtService, sessionRepo, apiKeyRepo, userRepo)
 		if deps.UserStoreProvider != nil {
 			if deps.PolicySystem != nil {
-				viewerResolver = policy.NewViewerResolver(userRepo, deps.UserStoreProvider, profileTokenService, deps.PolicySystem.PDP(), accessGroupStore)
+				viewerResolver = policy.NewViewerResolver(userRepo, deps.UserStoreProvider, profileTokenService, deps.PolicySystem.PDP(), accessGroupStore).WithUnratedContentPolicy(unratedContent)
 			} else {
 				// Legacy resolver: proxy/test wiring without a policy system. Production integrated/api modes always take the policy path. Removed with the legacy cleanup phase.
-				viewerResolver = access.NewResolver(userRepo, deps.UserStoreProvider, profileTokenService, accessGroupStore)
+				viewerResolver = access.NewResolver(userRepo, deps.UserStoreProvider, profileTokenService, accessGroupStore).WithUnratedContentPolicy(unratedContent)
 			}
 			viewerAccessMiddleware = apimw.NewViewerAccessMiddleware(viewerResolver)
 		}
@@ -1060,6 +1064,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 	var recsRepoForStale *recommendations.Repo
 	if ratingsRepo != nil && itemRepo != nil {
 		ratingsHandler = handlers.NewRatingsHandler(ratingsRepo, itemRepo)
+		if dispatcher, ok := deps.WatchProviderService.(handlers.LocalRatingEventDispatcher); ok {
+			ratingsHandler.SetLocalRatingEventDispatcher(dispatcher)
+		}
 		if deps.DB != nil {
 			recsRepoForStale = recommendations.NewRepo(deps.DB)
 			ratingsHandler.SetProfileStaler(recsRepoForStale)
@@ -1285,7 +1292,13 @@ func newChiRouter(deps Dependencies) chi.Router {
 			if subtitleRepo != nil {
 				subtitleReader = subtitleRepo
 			}
-			if resolver := handlers.NewSubtitleInventoryResolver(deps.FileRepo, subtitleReader); resolver != nil {
+			// The attempt store is an interface field: pass it only when set so
+			// the resolver never holds a typed nil either.
+			var attempts playback.PlanStoreV3
+			if playbackHandler.PlanStoreV3 != nil {
+				attempts = playbackHandler.PlanStoreV3
+			}
+			if resolver := handlers.NewSubtitleInventoryResolver(deps.FileRepo, subtitleReader, attempts); resolver != nil {
 				subtitleInventoryResolver = resolver
 			}
 		}
@@ -1941,6 +1954,10 @@ func newChiRouter(deps Dependencies) chi.Router {
 		// devices sync on app open / background refresh; there is no server
 		// background worker.
 		downloadSvc.SetSubscriptions(downloads.NewSubscriptionRepository(deps.DB))
+		if deps.UserStoreProvider != nil {
+			// delete_watched monitors skip episodes the profile has finished.
+			downloadSvc.SetProgressStores(deps.UserStoreProvider)
+		}
 		downloadHandler = handlers.NewDownloadHandler(downloadSvc)
 		if deps.NodePlanner != nil {
 			downloadHandler.SetProxyDelivery(deps.NodePlanner, func() string {
@@ -2222,7 +2239,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 				observeNative(deps.StreamTelemetry, r.Method, "/api/v2/stream/{session_id}", streamHandler.HandleStream)(w, r)
 			})
 			v2deps.PlaybackMedia.Subtitle = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				observeNative(deps.StreamTelemetry, r.Method, "/api/v2/stream/{session_id}/subtitles/{track}", streamHandler.HandleSubtitle)(w, r)
+				observeNative(deps.StreamTelemetry, r.Method, "/api/v2/stream/{session_id}/subtitles/{track}", streamHandler.HandleSubtitle)(w, r.WithContext(handlers.WithNativeAPIV2(r.Context())))
 			})
 			v2deps.PlaybackMedia.SubtitleFonts = streamHandler
 		}
@@ -2388,6 +2405,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 			v2deps.AdminJobArtifacts = adminJobsHandler
 			v2deps.AdminJobArtifactSigner = signer
 		}
+	}
+	if deps.StorageTransition != nil {
+		v2deps.AdminStorageTransition = deps.StorageTransition
 	}
 	if catalogSeedHandler != nil {
 		v2deps.AdminCatalogSources = catalogSeedHandler

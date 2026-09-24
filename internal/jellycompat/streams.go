@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -30,8 +31,10 @@ import (
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamlocation"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
+	"github.com/Silo-Server/silo-server/internal/telemetry"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodeproxy"
+	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
 
@@ -1264,7 +1267,7 @@ func (h *PlaybackHandler) fetchRemoteCompatManifest(ctx context.Context, nodeURL
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+h.JWTSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := telemetry.DoTrustedNode(transcodeproxy.NodeClient(), req, "stream")
 	if err != nil {
 		return nil, err
 	}
@@ -1286,7 +1289,7 @@ func (h *PlaybackHandler) proxyRemoteCompatSegment(w http.ResponseWriter, r *htt
 	}
 	req.Header.Set("Authorization", "Bearer "+h.JWTSecret)
 	transcodeproxy.PrepareRequest(req, r)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := telemetry.DoTrustedNode(transcodeproxy.NodeClient(), req, "stream")
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "TranscodeUnavailable", "Remote transcode segment is unavailable")
 		return
@@ -1300,7 +1303,7 @@ func (h *PlaybackHandler) proxyRemoteCompatSegment(w http.ResponseWriter, r *htt
 		return
 	}
 	if generation != "" && r.Method == http.MethodGet && sw.CompletedFullResponse(transcodeproxy.FullRepresentationSize(resp)) {
-		if err := transcodeproxy.Acknowledge(r.Context(), http.DefaultClient, nodepool.NodeEndpoint(nodeURL, path), h.JWTSecret, generation); err != nil {
+		if err := transcodeproxy.Acknowledge(r.Context(), transcodeproxy.NodeClient(), nodepool.NodeEndpoint(nodeURL, path), h.JWTSecret, generation); err != nil {
 			slog.WarnContext(r.Context(), "acknowledge Jellyfin-compatible transcode segment", "component", "jellycompat", "error", err, "playback_session_id", upstreamSessionID)
 		}
 	}
@@ -1501,7 +1504,7 @@ func (h *PlaybackHandler) HandleSubtitleStream(w http.ResponseWriter, r *http.Re
 
 	// Serve ASS/SSA as raw ASS when requested, preserving styled subtitle data.
 	if requestedFormat == "ass" && playback.IsASS(embeddedTrack.Codec) {
-		data, err := h.extractEmbeddedTextSubtitle(r.Context(), file.FilePath, embeddedOrdinal, "ass")
+		data, err := h.extractEmbeddedTextSubtitle(r.Context(), file, embeddedOrdinal, "ass")
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "ServerError", "Failed to extract subtitle")
 			return
@@ -1510,7 +1513,7 @@ func (h *PlaybackHandler) HandleSubtitleStream(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	data, subErr := h.extractEmbeddedTextSubtitle(r.Context(), file.FilePath, embeddedOrdinal, "srt")
+	data, subErr := h.extractEmbeddedTextSubtitle(r.Context(), file, embeddedOrdinal, "srt")
 	if subErr != nil {
 		writeError(w, http.StatusInternalServerError, "ServerError", "Failed to extract subtitle")
 		return
@@ -1580,9 +1583,72 @@ func writeSubtitleResponse(w http.ResponseWriter, format string, data []byte) {
 	_, _ = w.Write(data)
 }
 
-func (h *PlaybackHandler) extractEmbeddedTextSubtitle(ctx context.Context, filePath string, trackIndex int, format string) ([]byte, error) {
-	return h.SubtitleCache.ExtractText(ctx, filePath, trackIndex, format, func(ctx context.Context) ([]byte, error) {
-		return playback.ExtractSubtitleWithFormat(ctx, filePath, trackIndex, format, h.FFmpegPath)
+// extractEmbeddedTextSubtitle serves one embedded text track. A cache miss
+// extracts every text track of the file in the same demux, so switching to
+// another track later does not read the whole source again.
+func (h *PlaybackHandler) extractEmbeddedTextSubtitle(ctx context.Context, file *models.MediaFile, trackIndex int, format string) ([]byte, error) {
+	want := playback.TextSubtitleTrack{Ordinal: trackIndex, Format: format}
+	return h.SubtitleCache.ExtractTextTracks(ctx, file.FilePath, want, compatTextSubtitleTracks(file), h.extractTextSubtitleBatch,
+		func(ctx context.Context) ([]byte, error) {
+			return playback.ExtractSubtitleWithFormat(ctx, file.FilePath, trackIndex, format, h.FFmpegPath)
+		})
+}
+
+func (h *PlaybackHandler) extractTextSubtitleBatch(ctx context.Context, inputPath string, outputs []playback.TextSubtitleOutput) error {
+	return playback.ExtractTextSubtitlesToFiles(ctx, inputPath, outputs, h.FFmpegPath)
+}
+
+// compatTextSubtitleTracks lists the text renditions of a file's embedded
+// subtitle streams, indexed by their position among its subtitle streams.
+func compatTextSubtitleTracks(file *models.MediaFile) []playback.TextSubtitleTrack {
+	codecs := make([]string, len(file.SubtitleTracks))
+	for i, track := range file.SubtitleTracks {
+		codecs[i] = track.Codec
+	}
+	return playback.TextSubtitleTracks(codecs)
+}
+
+// compatWarmTextSubtitlesTimeout bounds the file lookup that starts a warm.
+const compatWarmTextSubtitlesTimeout = 10 * time.Second
+
+// warmCompatTextSubtitles extracts a file's embedded text subtitles in the
+// background. Jellyfin Web requests a track only when the viewer selects it,
+// and the first extraction reads the whole source, which takes minutes for a
+// large remux on network storage; starting it with playback makes a later
+// switch instant.
+func (h *PlaybackHandler) warmCompatTextSubtitles(fileID int) {
+	if h.SubtitleCache == nil || h.fileResolver == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), compatWarmTextSubtitlesTimeout)
+		file, err := h.fileResolver.GetByID(ctx, fileID)
+		cancel()
+		if err != nil || file == nil {
+			return
+		}
+		h.SubtitleCache.WarmTextTracks(file.FilePath, compatTextSubtitleTracks(file), h.extractTextSubtitleBatch)
+	}()
+}
+
+const (
+	compatStreamTypeSubtitle       = "Subtitle"
+	compatSubtitleDeliveryExternal = "External"
+)
+
+// compatWarmsTextSubtitles reports whether PlaybackInfo should extract a
+// source's embedded text subtitles ahead of time: the client fetches them
+// from the server, and the viewer has not turned subtitles off entirely.
+func compatWarmsTextSubtitles(subtitleMode string, streams []mediaStreamDTO) bool {
+	return subtitleMode != compatSubtitleNone && compatFetchesEmbeddedTextSubtitles(streams)
+}
+
+// compatFetchesEmbeddedTextSubtitles reports whether the client will fetch an
+// embedded text subtitle from the server rather than read it from the stream.
+func compatFetchesEmbeddedTextSubtitles(streams []mediaStreamDTO) bool {
+	return slices.ContainsFunc(streams, func(stream mediaStreamDTO) bool {
+		return stream.Type == compatStreamTypeSubtitle && !stream.IsExternal && stream.IsTextSubtitleStream &&
+			stream.DeliveryMethod == compatSubtitleDeliveryExternal
 	})
 }
 
@@ -1796,6 +1862,8 @@ const (
 	compatAudioCodecOpus       = "opus"
 	compatContainerMP4         = "mp4"
 	compatVideoCodecHEVC       = "hevc"
+	compatVideoCodecH265       = "h265"
+	compatVideoCodecAV1        = "av1"
 	compatRangeDOVI            = "DOVI"
 	compatRangeDOVIWithHLG     = "DOVIWithHLG"
 	compatRangeDOVIWithHDR     = "DOVIWithHDR10"
@@ -2185,6 +2253,12 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 			findMediaSource(playSession, req.MediaSourceID), &positionSeconds,
 		)
 	}
+	// Only the Stopped report and the report that marks the item watched change
+	// the taste profile; a position-only report does not. A Stopped report
+	// refreshes even when it carries no position: the play's earlier reports
+	// already wrote its progress, and StopSession does not run the native stop
+	// finalizer that would otherwise refresh the profile.
+	refreshTasteProfile := stop
 	// Persist progress to user store
 	if positionSeconds > 0 && h.storeProvider != nil && playSession.ItemID != "" {
 		if store, storeErr := h.storeProvider.ForUser(r.Context(), session.StreamAppUserID); storeErr == nil {
@@ -2196,10 +2270,14 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 					break
 				}
 			}
-			if err := store.UpdateProgress(r.Context(), session.ProfileID, playSession.ItemID, positionSeconds, duration, h.playbackThresholds(r.Context())); err == nil {
-				triggerProfileRefresh(r.Context(), h.profileStaler, h.profileRefreshRequester, session.StreamAppUserID, session.ProfileID)
+			completed, err := userstore.UpdateProgressReportingCompletion(r.Context(), store, session.ProfileID, playSession.ItemID, positionSeconds, duration, h.playbackThresholds(r.Context()))
+			if err == nil && completed {
+				refreshTasteProfile = true
 			}
 		}
+	}
+	if refreshTasteProfile && playSession.ItemID != "" {
+		triggerProfileRefresh(r.Context(), h.profileStaler, h.profileRefreshRequester, session.StreamAppUserID, session.ProfileID)
 	}
 	if stop {
 		// Direct ids and recorded aliases are per-play, caller-owned identifiers.
@@ -2672,6 +2750,7 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 		}
 	}
 	opts.SegmentDuration = h.compatSegmentDuration()
+	autoPipeline := h.newCompatAutoTranscodePipeline(ctx, opts)
 
 	// Hold the per-session lifecycle lock across "check existing → spawn →
 	// register" so a concurrent reconstruct cannot run a second ffmpeg writer
@@ -2694,7 +2773,9 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 		h.tm.CloseTranscodeSessionIf(upstreamSessionID, existing, "")
 	}
 	manifestDeadline := time.Now().Add(compatManifestStartupTimeout)
-	transcodeSession, err := playback.StartTranscode(ctx, opts)
+	// A disabled pipeline returns opts unchanged. An enabled one never carries
+	// a tone-map recipe, so the tone-map downgrade below cannot apply to it.
+	transcodeSession, err := playback.StartTranscode(ctx, autoPipeline.Current())
 	if err != nil && downgradeCompatLocalToneMap(&opts, toneMapCapabilities, autoVideoToolboxBitrate) {
 		transcodeSession, err = playback.StartTranscode(ctx, opts)
 		if err == nil {
@@ -2751,6 +2832,15 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 				return nil, fallbackErr
 			}
 		}
+	} else if autoPipeline.Enabled() {
+		var successor *playback.TranscodeSession
+		transcodeSession, successor, err = h.awaitCompatAutoTranscode(ctx, upstreamSessionID, source, requiredToneMapMode, autoPipeline, transcodeSession)
+		if err != nil {
+			return nil, err
+		}
+		if successor != nil {
+			return successor, nil
+		}
 	}
 	if h.compatLocalTranscodeReady != nil {
 		h.compatLocalTranscodeReady(transcodeSession)
@@ -2803,6 +2893,82 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 	publishUnlock()
 
 	return transcodeSession, nil
+}
+
+func (h *PlaybackHandler) newCompatAutoTranscodePipeline(ctx context.Context, opts playback.TranscodeOpts) *playback.AutoTranscodePipeline {
+	if h.compatAutoTranscodePipeline != nil {
+		return h.compatAutoTranscodePipeline(ctx, opts)
+	}
+	return playback.NewAutoTranscodePipeline(ctx, opts)
+}
+
+// awaitCompatAutoTranscode waits for a registered hw_accel=auto transcode and,
+// when FFmpeg exits before its first manifest, replaces it under the lifecycle
+// lock with the pipeline's next safer path. A process still running at the
+// deadline is kept: it is already registered for concurrent manifest requests,
+// and a second encoder would duplicate it. It returns the ready (or slow)
+// session, or the live successor another caller installed instead.
+func (h *PlaybackHandler) awaitCompatAutoTranscode(
+	ctx context.Context,
+	upstreamSessionID string,
+	source PlaybackMediaSource,
+	requiredToneMapMode tonemap.Mode,
+	pipeline *playback.AutoTranscodePipeline,
+	transcodeSession *playback.TranscodeSession,
+) (*playback.TranscodeSession, *playback.TranscodeSession, error) {
+	for {
+		_, readyErr := transcodeSession.WaitForGenerationManifest(compatManifestStartupTimeout)
+		if readyErr == nil {
+			pipeline.RememberSuccess()
+			return transcodeSession, nil, nil
+		}
+		if transcodeSession.IsRunning() {
+			slog.WarnContext(ctx, "compat transcode slow to produce a manifest",
+				"component", "jellycompat", "playback_session_id", upstreamSessionID, "error", readyErr)
+			return transcodeSession, nil, nil
+		}
+		failedDevice := transcodeSession.Opts().HWDevice
+		advanced := pipeline.AdvanceAfterFailure(failedDevice)
+		replaceUnlock := h.tm.LockSessionLifecycle(upstreamSessionID)
+		if live := h.tm.GetTranscodeSession(upstreamSessionID); live != transcodeSession {
+			replaceUnlock()
+			if live != nil && compatTranscodeSessionUsesToneMapMode(live, requiredToneMapMode) {
+				if compatLiveTranscodeMatchesAudioSource(live, source) {
+					return nil, live, nil
+				}
+				return nil, nil, errCompatRecipeSourceMismatch
+			}
+			if live != nil {
+				return nil, nil, errHDRTranscodeUnsupported
+			}
+			return nil, nil, readyErr
+		}
+		h.tm.CloseTranscodeSessionIf(upstreamSessionID, transcodeSession, "")
+		if !advanced {
+			replaceUnlock()
+			return nil, nil, readyErr
+		}
+		next := pipeline.Current()
+		slog.WarnContext(ctx, "compat transcode exited during startup; trying a safer path",
+			"component", "jellycompat",
+			"playback_session_id", upstreamSessionID,
+			"failed_device", failedDevice,
+			"next_hw_accel", next.HWAccel,
+			"next_software_decode", next.SoftwareVideoDecode,
+			"error", readyErr,
+		)
+		replacement, err := playback.StartTranscode(ctx, next)
+		if err != nil {
+			replaceUnlock()
+			return nil, nil, err
+		}
+		if !h.tm.RegisterTranscodeSession(upstreamSessionID, replacement) {
+			replaceUnlock()
+			return nil, nil, context.Canceled
+		}
+		replaceUnlock()
+		transcodeSession = replacement
+	}
 }
 
 // downgradeCompatLocalToneMap removes the bitrate synthesized solely for a
@@ -3383,6 +3549,33 @@ func generateCompatCopyVideoMasterManifestForVariant(source PlaybackMediaSource,
 	if supplemental := compatMasterSupplementalCodec(video); supplemental != "" {
 		attributes = append(attributes, fmt.Sprintf("SUPPLEMENTAL-CODECS=%q", supplemental))
 	}
+	shape := compatMasterShapeAttributes(video)
+	attributes = append(attributes, shape...)
+
+	manifest := "#EXTM3U\n"
+	if source.DOVIVariant && !source.HLSRemuxMPEGTS {
+		// Jellyfin 12 lists the spec-compliant Dolby Vision variant first so
+		// DV-capable players pick it over the hvc1 fallback at equal bandwidth.
+		dovi := []string{
+			fmt.Sprintf("BANDWIDTH=%d", bandwidth),
+			fmt.Sprintf("AVERAGE-BANDWIDTH=%d", bandwidth),
+			"VIDEO-RANGE=PQ",
+		}
+		codecs := compatDOVICodecString(video)
+		if audioCodec := compatMasterAudioCodec(source, audio); audioCodec != "" {
+			codecs += "," + audioCodec
+		}
+		dovi = append(dovi, fmt.Sprintf("CODECS=%q", codecs))
+		dovi = append(dovi, shape...)
+		manifest += "#EXT-X-STREAM-INF:" + strings.Join(dovi, ",") + "\n" + variantURL + "\n"
+	}
+	return []byte(manifest + "#EXT-X-STREAM-INF:" + strings.Join(attributes, ",") + "\n" + variantURL + "\n")
+}
+
+// compatMasterShapeAttributes returns the RESOLUTION and FRAME-RATE
+// attributes shared by every variant of a copy master playlist.
+func compatMasterShapeAttributes(video models.VideoTrack) []string {
+	var attributes []string
 	if video.Width > 0 && video.Height > 0 {
 		attributes = append(attributes, fmt.Sprintf("RESOLUTION=%dx%d", video.Width, video.Height))
 	}
@@ -3390,8 +3583,18 @@ func generateCompatCopyVideoMasterManifestForVariant(source PlaybackMediaSource,
 		rounded := math.Round(frameRate*1000) / 1000
 		attributes = append(attributes, "FRAME-RATE="+strconv.FormatFloat(rounded, 'f', -1, 64))
 	}
+	return attributes
+}
 
-	return []byte("#EXTM3U\n#EXT-X-STREAM-INF:" + strings.Join(attributes, ",") + "\n" + variantURL + "\n")
+// compatDOVICodecString is Jellyfin 12's Dolby Vision CODECS entry for a
+// stream without a compatible base layer: dvh1.PP.LL for HEVC, dav1.PP.LL for
+// AV1.
+func compatDOVICodecString(video models.VideoTrack) string {
+	fourCC := "dvh1"
+	if strings.EqualFold(strings.TrimSpace(video.Codec), "av1") {
+		fourCC = "dav1"
+	}
+	return fmt.Sprintf("%s.%02d.%02d", fourCC, video.DVProfile, video.DVLevel)
 }
 
 func compatMasterVideoRange(video models.VideoTrack, versionHDR bool) string {
@@ -3433,32 +3636,80 @@ func compatMasterCodecs(source PlaybackMediaSource, video models.VideoTrack, aud
 		}
 	}
 
+	if audioCodec := compatMasterAudioCodec(source, audio); audioCodec != "" {
+		codecs = append(codecs, audioCodec)
+	}
+	return strings.Join(codecs, ",")
+}
+
+// compatMasterAudioCodec returns the RFC 6381 CODECS entry for the audio a
+// copy master playlist carries, or "" when the codec has none.
+func compatMasterAudioCodec(source PlaybackMediaSource, audio models.AudioTrack) string {
 	audioCodec := strings.ToLower(strings.TrimSpace(audio.Codec))
 	if compatHLSTranscodesAudio(source) {
 		audioCodec = compatTargetAudioCodec
 	}
 	switch audioCodec {
 	case compatTargetAudioCodec:
-		if strings.EqualFold(audio.Profile, "HE") && !compatHLSTranscodesAudio(source) {
-			codecs = append(codecs, "mp4a.40.5")
-		} else {
-			codecs = append(codecs, "mp4a.40.2")
-		}
+		return compatAACCodecString(audio.Profile, compatHLSTranscodesAudio(source))
 	case compatAudioCodecMP3:
-		codecs = append(codecs, "mp4a.40.34")
+		return "mp4a.40.34"
 	case compatAudioCodecAC3, "ac-3":
-		codecs = append(codecs, "ac-3")
+		return "ac-3"
 	case compatAudioCodecEAC3, "e-ac-3", "ec-3":
-		codecs = append(codecs, "ec-3")
+		return "ec-3"
 	case compatAudioCodecFLAC:
-		codecs = append(codecs, "fLaC")
+		return "fLaC"
 	case "alac":
-		codecs = append(codecs, "alac")
+		return "alac"
 	case compatAudioCodecOpus:
-		codecs = append(codecs, "Opus")
+		return "Opus"
+	case "truehd", "mlp": //nolint:goconst // probed codec names
+		return "mlpa"
+	case "dts", "dca": //nolint:goconst // probed codec names
+		return compatDTSCodecString(audio.Profile)
+	default:
+		return ""
 	}
-	return strings.Join(codecs, ",")
 }
+
+// compatAACCodecString names a copied AAC track by its probed profile (ffprobe
+// reports "HE-AAC" and "HE-AACv2"); the transcode ladder always encodes AAC-LC.
+func compatAACCodecString(profile string, transcoded bool) string {
+	if transcoded {
+		return hlsCodecAACLC
+	}
+	switch strings.ToUpper(strings.TrimSpace(profile)) {
+	case "HE-AAC", "HE": //nolint:goconst // ffprobe AAC profile names
+		return "mp4a.40.5"
+	case "HE-AACV2":
+		return "mp4a.40.29"
+	default:
+		return hlsCodecAACLC
+	}
+}
+
+// compatDTSCodecString maps a copied DTS track's probed profile to its HLS
+// sample-entry code, matching Jellyfin 12: core DTS (and unknown profiles) is
+// dtsc, the lossless and high-resolution DTS-HD profiles are dtsh, and DTS
+// Express is dtse.
+func compatDTSCodecString(profile string) string {
+	switch strings.ToUpper(strings.TrimSpace(profile)) {
+	case "DTS-HD HRA", "DTS-HD MA", "DTS-HD MA + DTS:X", "DTS-HD MA + DTS:X IMAX": //nolint:goconst // ffprobe DTS profile names
+		return hlsCodecDTSHD
+	case "DTS EXPRESS":
+		return "dtse"
+	default:
+		return hlsCodecDTSCore
+	}
+}
+
+// RFC 6381 sample-entry codes used more than once in copy master playlists.
+const (
+	hlsCodecAACLC   = "mp4a.40.2"
+	hlsCodecDTSCore = "dtsc"
+	hlsCodecDTSHD   = "dtsh"
+)
 
 func compatMasterSupplementalCodec(video models.VideoTrack) string {
 	if playback.VideoSampleEntryForDVCopy(video.DVProfile) != playback.VideoSampleEntryDVH1 || video.DVLevel <= 0 {

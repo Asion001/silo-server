@@ -1887,6 +1887,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v2/admin/jobs/{id}/cancel": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Request cancellation of a cancellable administrator job. Completed effects and verified storage-copy checkpoints are retained. */
+    post: operations["cancelAdminJob"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v2/admin/jobs/capabilities": {
     parameters: {
       query?: never;
@@ -3916,6 +3933,57 @@ export interface paths {
     };
     /** Read bounded title and household-profile leaderboards from existing watch history aggregates. */
     get: operations["getAdminDashboardTopActivity"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v2/admin/storage-transitions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Queue a verified managed storage transition. The old location is retained and the committed target takes effect after restart. */
+    post: operations["createAdminStorageTransition"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v2/admin/storage-transitions/capabilities": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Discover managed storage transition support in this build. */
+    get: operations["getAdminStorageTransitionCapabilities"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v2/admin/storage-transitions/source-health": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Check whether the currently configured S3 source is reachable before choosing a storage-transition policy. */
+    get: operations["getAdminStorageTransitionSourceHealth"];
     put?: never;
     post?: never;
     delete?: never;
@@ -6177,7 +6245,10 @@ export interface paths {
     /** Page the calling device's series monitors, including paused monitors. */
     get: operations["listDownloadSubscriptions"];
     put?: never;
-    /** Create a monitor or return the existing monitor without changing it. Sync explicitly after receipt; do not automatically resend an uncertain create. */
+    /**
+     * Create a monitor or return the device's existing monitor for the series.
+     * @description An existing monitor keeps its options and forgets the episodes deleted under it, so the next sync can register them again. Sync explicitly after receipt; do not automatically resend an uncertain create.
+     */
     post: operations["createDownloadSubscription"];
     delete?: never;
     options?: never;
@@ -10644,6 +10715,10 @@ export interface components {
     AdminArtworkStorageStatus: {
       backend?: string;
       locked: boolean;
+      /** @description Whether the private bucket's endpoint, bucket, and key prefix are locked: when a bucket is configured at startup, or once artwork is stored. Changing them then takes a managed storage transition. */
+      private_locked: boolean;
+      /** @description Whether the storage lock state was read successfully. When false, clients must not treat locked=false as permission to edit storage locations. */
+      status_known: boolean;
     };
     AdminAuditLog: {
       client_ip: string;
@@ -14639,6 +14714,67 @@ export interface components {
       /** Format: int64 */
       year?: number;
     };
+    AdminStorageTransitionAccepted: {
+      job: components["schemas"]["AdminTaskJob"];
+      preflight: components["schemas"]["AdminStorageTransitionPreflight"];
+    };
+    AdminStorageTransitionCapabilities: {
+      /** @description Whether the current principal may use the capability */
+      allowed: boolean;
+      job_cancellation: boolean;
+      local_target: boolean;
+      migrate_all: boolean;
+      preserve_uploads: boolean;
+      resumable_recovery: boolean;
+      /** @description Opaque revision of this document */
+      revision: string;
+      s3_target: boolean;
+      source_health: boolean;
+      start_fresh: boolean;
+      /**
+       * @description Support and configuration state, not health
+       * @enum {string}
+       */
+      state: "available" | "disabled" | "not_configured" | "unsupported";
+    };
+    AdminStorageTransitionPreflight: {
+      catalog_seeds: string;
+      current_backend: string;
+      diagnostics: string;
+      policy: string;
+      provider_images: string;
+      subtitles: string;
+      target_backend: string;
+      uploads: string;
+      warnings: string[];
+    };
+    AdminStorageTransitionRequest: {
+      /** @enum {string} */
+      policy: "start_fresh" | "preserve_uploads" | "migrate_all";
+      values: {
+        [key: string]: string;
+      };
+    };
+    AdminStorageTransitionSourceHealth: {
+      current_backend: string;
+      message: string;
+      private_configured: boolean;
+      private_reachable: boolean;
+      public_configured: boolean;
+      public_reachable: boolean;
+      reachability_probed: boolean;
+      reachable: boolean;
+      /** @description Safe failure summary without storage errors or locations. */
+      recovery_error?: string;
+      /** @enum {string} */
+      recovery_failure_category?: "retryable" | "blocked" | "unknown";
+      recovery_pending: boolean;
+      /** @description Safe recovery status without storage errors or locations. */
+      recovery_progress_message?: string;
+      /** Format: int64 */
+      recovery_progress_percent?: number;
+      recovery_state?: string;
+    };
     AdminStoredSubtitle: {
       /**
        * Format: date-time
@@ -14864,6 +15000,8 @@ export interface components {
       started_at: string;
       /** @enum {string} */
       status: "completed" | "failed" | "cancelled";
+      /** @description Per-step outcomes for tasks that run several steps, such as database_maintenance. */
+      steps?: components["schemas"]["AdminTaskStepResult"][];
       task_key: string;
     };
     AdminTaskExecutionSummary: {
@@ -14883,6 +15021,8 @@ export interface components {
       started_at: string;
       /** @enum {string} */
       status: "completed" | "failed" | "cancelled";
+      /** @description Per-step outcomes for tasks that run several steps, such as database_maintenance. */
+      steps?: components["schemas"]["AdminTaskStepResult"][];
       task_key: string;
     };
     AdminTaskJob: {
@@ -14931,6 +15071,7 @@ export interface components {
        */
       started_at?: string;
       state: string;
+      storage_transition_result?: components["schemas"]["AdminTaskJobStorageTransitionResult"];
       template_result?: components["schemas"]["AdminTemplateResult"];
       terminal: boolean;
     };
@@ -15009,6 +15150,39 @@ export interface components {
       /** Format: int64 */
       total_items: number;
     };
+    AdminTaskJobStorageTransitionResult: {
+      /**
+       * @description Safe failure category; present only for failed transitions.
+       * @enum {string}
+       */
+      failure_category?:
+        | "preparation_failed"
+        | "target_check_failed"
+        | "copy_failed"
+        | "verification_failed"
+        | "commit_failed"
+        | "unknown";
+      manual_restart_required: boolean;
+      /**
+       * @description Safe transition phase. Internal progress messages and storage locations are omitted.
+       * @enum {string}
+       */
+      phase:
+        | "queued"
+        | "checking_target"
+        | "copying"
+        | "verifying"
+        | "committing"
+        | "restart_pending"
+        | "completed"
+        | "failed"
+        | "canceled";
+      /**
+       * Format: int64
+       * @description Objects whose destination content was verified during the current copy pass.
+       */
+      verified_objects: number;
+    };
     AdminTaskMarkerResult: {
       /** Format: int64 */
       failed: number;
@@ -15052,6 +15226,12 @@ export interface components {
     };
     AdminTaskScheduleInputBody: {
       triggers: components["schemas"]["AdminTaskTrigger"][];
+    };
+    AdminTaskStepResult: {
+      key: string;
+      name: string;
+      /** @enum {string} */
+      status: "completed" | "failed";
     };
     AdminTaskTrigger: {
       /** Format: int64 */
@@ -17062,11 +17242,13 @@ export interface components {
     };
     ConnectionUpdate: {
       export_favorites_enabled?: boolean;
+      export_ratings_enabled?: boolean;
       export_unwatched_enabled?: boolean;
       export_watched_enabled?: boolean;
       export_watchlist_enabled?: boolean;
       import_favorites_enabled?: boolean;
       import_progress_enabled?: boolean;
+      import_ratings_enabled?: boolean;
       import_watched_enabled?: boolean;
       import_watchlist_enabled?: boolean;
       scrobble_enabled?: boolean;
@@ -25350,11 +25532,13 @@ export interface components {
     };
     WatchProviderCapabilities: {
       export_favorites: boolean;
+      export_ratings: boolean;
       export_unwatched: boolean;
       export_watched: boolean;
       export_watchlist: boolean;
       import_favorites: boolean;
       import_progress: boolean;
+      import_ratings: boolean;
       import_watched: boolean;
       import_watchlist: boolean;
       provides_watchlist_order: boolean;
@@ -25370,11 +25554,13 @@ export interface components {
       credentials_configured: boolean;
       display_name: string;
       export_favorites_enabled: boolean;
+      export_ratings_enabled: boolean;
       export_unwatched_enabled: boolean;
       export_watched_enabled: boolean;
       export_watchlist_enabled: boolean;
       import_favorites_enabled: boolean;
       import_progress_enabled: boolean;
+      import_ratings_enabled: boolean;
       import_watched_enabled: boolean;
       import_watchlist_enabled: boolean;
       last_error?: string;
@@ -25438,11 +25624,15 @@ export interface components {
     };
     WatchProviderSettings: {
       export_favorites_enabled: boolean;
+      /** @description Send the profile's star ratings to the provider (stars times two) and clear removed ones. */
+      export_ratings_enabled: boolean;
       export_unwatched_enabled: boolean;
       export_watched_enabled: boolean;
       export_watchlist_enabled: boolean;
       import_favorites_enabled: boolean;
       import_progress_enabled: boolean;
+      /** @description Import the provider's movie and series ratings as stars (1-2 is 1 star, 9-10 is 5 stars). */
+      import_ratings_enabled: boolean;
       import_watched_enabled: boolean;
       import_watchlist_enabled: boolean;
       scrobble_enabled: boolean;
@@ -25494,6 +25684,10 @@ export interface components {
       /** Format: int64 */
       inbound_progress_imported: number;
       /** Format: int64 */
+      inbound_ratings_found: number;
+      /** Format: int64 */
+      inbound_ratings_imported: number;
+      /** Format: int64 */
       inbound_watched_found: number;
       /** Format: int64 */
       inbound_watched_imported: number;
@@ -25507,6 +25701,16 @@ export interface components {
       outbound_favorites_sent: number;
       /** Format: int64 */
       outbound_found: number;
+      /**
+       * Format: int64
+       * @description Movie and series ratings the profile holds.
+       */
+      outbound_ratings_found: number;
+      /**
+       * Format: int64
+       * @description Ratings set or cleared on the provider.
+       */
+      outbound_ratings_sent: number;
       /** Format: int64 */
       outbound_sent: number;
       /** Format: int64 */
@@ -44600,6 +44804,133 @@ export interface operations {
       };
     };
   };
+  cancelAdminJob: {
+    parameters: {
+      query?: never;
+      header?: {
+        /** @description Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted. */
+        "X-Profile-Id"?: string;
+        /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
+        "X-Profile-Token"?: string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The job was already canceled. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AdminTaskJob"];
+        };
+      };
+      /** @description Accepted */
+      202: {
+        headers: {
+          "Retry-After"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AdminTaskJob"];
+        };
+      };
+      /** @description Bad Request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Acceptable */
+      406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Conflict */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
   getAdminJobCapabilities: {
     parameters: {
       query?: never;
@@ -46165,7 +46496,7 @@ export interface operations {
         user_id?: number;
       };
       header: {
-        /** @description Browser origin must match the configured public origin. */
+        /** @description Browser origin must match the configured public origin, the request origin, or a connected network access overlay origin. */
         Origin?: string;
         /** @description Offer silo.admin-logs.v2 followed by silo.ticket.<single-use-ticket>. */
         "Sec-WebSocket-Protocol": string;
@@ -63111,6 +63442,394 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["AdminDashboardTopActivity"];
+        };
+      };
+      /** @description Bad Request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Acceptable */
+      406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
+  createAdminStorageTransition: {
+    parameters: {
+      query?: never;
+      header?: {
+        /** @description Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted. */
+        "X-Profile-Id"?: string;
+        /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
+        "X-Profile-Token"?: string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminStorageTransitionRequest"];
+      };
+    };
+    responses: {
+      /** @description Accepted */
+      202: {
+        headers: {
+          Location?: string;
+          "Retry-After"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AdminStorageTransitionAccepted"];
+        };
+      };
+      /** @description Bad Request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Acceptable */
+      406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Request Timeout */
+      408: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Conflict */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Request Entity Too Large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unsupported Media Type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
+  getAdminStorageTransitionCapabilities: {
+    parameters: {
+      query?: never;
+      header?: {
+        /** @description Optional first precondition, evaluated before If-None-Match: a tag that does not match the current representation is 412 precondition_failed. */
+        "If-Match"?: string;
+        "If-None-Match"?: string;
+        /** @description Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted. */
+        "X-Profile-Id"?: string;
+        /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
+        "X-Profile-Token"?: string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description OK */
+      200: {
+        headers: {
+          "Cache-Control"?: string;
+          /** @description The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read. */
+          ETag?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AdminStorageTransitionCapabilities"];
+        };
+      };
+      /** @description The representation named by If-None-Match is current; no body. */
+      304: {
+        headers: {
+          /** @description The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read. */
+          ETag?: string;
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Bad Request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Acceptable */
+      406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Precondition Failed */
+      412: {
+        headers: {
+          /** @description The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read. */
+          ETag?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
+  getAdminStorageTransitionSourceHealth: {
+    parameters: {
+      query?: {
+        probe?: boolean;
+      };
+      header?: {
+        /** @description Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted. */
+        "X-Profile-Id"?: string;
+        /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
+        "X-Profile-Token"?: string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description OK */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AdminStorageTransitionSourceHealth"];
         };
       };
       /** @description Bad Request */
@@ -84634,7 +85353,7 @@ export interface operations {
         channels?: string;
       };
       header: {
-        /** @description Browser origin must match the configured public origin. */
+        /** @description Browser origin must match the configured public origin, the request origin, or a connected network access overlay origin. */
         Origin?: string;
         /** @description Offer silo.events.v2 followed by silo.ticket.<single-use-ticket>. */
         "Sec-WebSocket-Protocol": string;
@@ -97765,7 +98484,7 @@ export interface operations {
     parameters: {
       query?: never;
       header: {
-        /** @description Browser origin must match the configured public origin. */
+        /** @description Browser origin must match the configured public origin, the request origin, or a connected network access overlay origin. */
         Origin?: string;
         /** @description Offer silo.playback-control.v2 followed by silo.ticket.<single-use-ticket>. */
         "Sec-WebSocket-Protocol": string;
@@ -107477,6 +108196,8 @@ export interface operations {
         duration?: number;
         /** @description Source media file the inventory URL names; must be the plan's effective or requested file. */
         file_id?: string;
+        /** @description 1 on a .srt URL published under subrip_sidecar_v1: serve the stored SRT bytes instead of the WebVTT conversion. */
+        original?: string;
         /** @description Seek position in seconds for windowed text extraction. */
         position?: number;
         /** @description Signed stream reference the plan URL carries; it reconstructs the session after a restart. Omitted for header-authenticated media. Account and viewer authorization are always required. */
@@ -107494,7 +108215,7 @@ export interface operations {
       };
       path: {
         session_id: string;
-        /** @description Combined subtitle ordinal from the plan inventory, optionally suffixed with the sidecar extension (.vtt, .ass, .sup) the inventory URL carries. */
+        /** @description Combined subtitle ordinal from the plan inventory, optionally suffixed with the sidecar extension (.vtt, .ass, .sup, .srt) the inventory URL carries. */
         track: string;
       };
       cookie?: never;
@@ -107625,6 +108346,8 @@ export interface operations {
         duration?: number;
         /** @description Source media file the inventory URL names; must be the plan's effective or requested file. */
         file_id?: string;
+        /** @description 1 on a .srt URL published under subrip_sidecar_v1: serve the stored SRT bytes instead of the WebVTT conversion. */
+        original?: string;
         /** @description Seek position in seconds for windowed text extraction. */
         position?: number;
         /** @description Signed stream reference the plan URL carries; it reconstructs the session after a restart. Omitted for header-authenticated media. Account and viewer authorization are always required. */
@@ -107642,7 +108365,7 @@ export interface operations {
       };
       path: {
         session_id: string;
-        /** @description Combined subtitle ordinal from the plan inventory, optionally suffixed with the sidecar extension (.vtt, .ass, .sup) the inventory URL carries. */
+        /** @description Combined subtitle ordinal from the plan inventory, optionally suffixed with the sidecar extension (.vtt, .ass, .sup, .srt) the inventory URL carries. */
         track: string;
       };
       cookie?: never;
@@ -115614,7 +116337,7 @@ export interface operations {
     parameters: {
       query?: never;
       header: {
-        /** @description Browser origin must match configured public origin. */
+        /** @description Browser origin must match the configured public origin, the request origin, or a connected network access overlay origin. */
         Origin?: string;
         /** @description Offer silo.room.v2 followed by silo.ticket.<single-use-ticket>. */
         "Sec-WebSocket-Protocol": string;
