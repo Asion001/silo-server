@@ -68,9 +68,25 @@ A profile with no stored subtitle mode reads as `Default`, Jellyfin's default.
 Modes set outside a Jellyfin client read as the matching row (`off` with forced
 subtitles shown reads as `OnlyForced`).
 
+Audio and subtitle language preferences use three-letter ISO codes for recognized
+languages (for example, `eng`). They match Jellyfin Web's selector only when
+`/Localization/Cultures` offers that language; `fil`, for example, has no option.
+Unrecognized and undefined tags are preserved. Native settings retain canonical
+BCP 47 tags. Returning an unchanged language choice preserves a native region or
+script preference, such as `pt-BR`; selecting a different language replaces it,
+and an empty or null preference clears it.
+
 `AudioLanguagePreference` `OriginalLanguage` stores the settings-contract tag
 `x-silo-original` and reads back as `OriginalLanguage`; playback then prefers
 each item's original-language audio, as native clients do.
+
+Movie and episode detail responses select `DefaultSubtitleStreamIndex` from the
+viewer's effective subtitle mode and language, including downloaded subtitles.
+The detail-page selection therefore carries into playback instead of sending
+an unintended Off choice. Explicit playback choices, including Off, still win.
+If playback negotiates a different audio language, clients must omit
+`SubtitleStreamIndex` to request a fresh automatic subtitle selection. An echoed
+`-1` remains Off because it is indistinguishable from an intentional Off choice.
 
 `PlaybackInfo` defaults follow the viewer's settings. `DefaultAudioStreamIndex`
 is the audio track Silo selects for the viewer (audio language preference,
@@ -132,7 +148,7 @@ request disables Primary images.
 | `GET /Studios` | Visible catalog studios with paging. |
 | `GET /Shows/Upcoming` | Scoped episodes dated from yesterday in UTC onward, with paging. |
 | `GET /Items/{id}/ThemeMedia` | `ThemeSongsResult` and `ThemeVideosResult` envelopes after validating the owner. |
-| `GET /Items/{id}/ThemeSongs`, `/ThemeVideos` | Valid empty theme result for a visible owner; theme ingestion is not implemented. |
+| `GET /Items/{id}/ThemeSongs`, `/ThemeVideos` | Local theme songs for a visible owner; theme videos remain empty. |
 | `GET /Persons`, `/Persons/{name}` | People with credits in movies or series visible to the current profile. `/Persons` accepts Jellyfin 12's `StartIndex`, `NameStartsWith`, `NameLessThan`, and `NameStartsWithOrGreater` (lowercased name comparisons) and a library or movie/series `ParentId`; other parents match nobody. Pages without `SearchTerm` hold up to 100 people; searches stay capped at 20. Person photo tags are signed and appear only in responses that passed this visibility check. `GET /Items/{personId}/Images/Primary` accepts a matching signed `tag` without authentication, as Jellyfin Web sends image requests without credentials; otherwise the session must see a credit for the person. Either check runs before cached artwork is used. |
 
 These changes do not implement every advanced query option. Random and compound
@@ -159,6 +175,17 @@ Static direct-play requests without PlaybackInfo cannot transcode an over-limit
 source and receive `PlaybackUnavailable` instead. Negotiated limits are kept
 with the playback session, so policy edits affect only new sessions.
 Query `StartTimeTicks` is honored. Remux-only URLs use `static=false`.
+
+Silo gives each version its own `MediaSources[i].Id`, while real Jellyfin reuses
+the item id. Some clients therefore send a media-source id where an item id
+belongs. `PlaybackInfo`, `GET /Items/{id}`, `MediaSegments`, `Download`, static
+`/Videos/{id}/stream`, and the user-data and played-state routes accept a
+media-source id there and resolve it to the item that owns its file (the
+episode for an episode file). On `PlaybackInfo` the id selects that version
+unless the body names a `MediaSourceId`. A stale body `MediaSourceId` falls back
+to the route's version, and a route version the item no longer has answers
+`404`. The negotiated session keeps the client's id as its route item id, so the
+stream URLs it hands out and later session reports can carry that id.
 
 The managed Jellyfin Web build opts into `SiloSeekReanchor=true` on
 `PlaybackInfo`. For a copied-video HLS source, the response echoes
@@ -268,11 +295,34 @@ same way. Turning off hardware video decoding in Chrome avoids it.
 
 ## Sessions and socket
 
+Sign-in refuses an account holding a temporary password with `401` and a message to
+sign in to Silo first: Jellyfin clients cannot run the password change it requires
+(see [temporary passwords](auth-api.md#temporary-passwords)). The account's other
+state is unaffected, and signing in works again once the password is changed.
+
 `GET /Sessions` lists started playback mappings owned by the caller's token,
 including mappings persisted by another API process. Device and activity filters
 apply to the returned list. Current native play state is included when locally
 available and its account/profile ownership matches; unavailable remote state
 is omitted.
+
+Direct players such as webOS may send an empty `PlaySessionId` on
+`/Sessions/Playing`, `/Sessions/Playing/Progress`, and `/Sessions/Playing/Stopped`.
+Silo saves their reported position when the authenticated item/source identifiers
+match exactly one started, active playback. Pending negotiations and terminal
+sessions do not qualify; ambiguous matches are ignored. A final stop sample is
+saved even when the viewer did not pause first. Samples remain last-write-wins,
+including backward seeks to a positive position. Zero or omitted positions leave
+the bookmark unchanged so startup reports cannot erase a saved resume point.
+Without a per-play identifier a delayed sample cannot be distinguished from a new one. Unidentified stops do not change audio selection
+or tear down resources. Native idle cleanup reaps the upstream session, but the
+compatibility mapping remains routable until its configured expiry. A later play
+that creates another mapping for the same item can make ID-less reports ambiguous
+until the old mapping expires. Clients that send a valid per-play identifier
+retain immediate, generation-scoped teardown.
+ID-less static requests reject ambiguous matches and failed durable identity
+lookups rather than selecting another session. Durable identity checks remain
+fresh on every request; full session payloads use the normal per-session cache.
 
 `POST /Sessions/Playing/Ping` touches the caller-owned playback activity without
 changing position or paused state. The native session owner consumes persisted
@@ -321,3 +371,43 @@ described above.
 
 The compatibility surface does not add audio-library playback, Live TV, IPTV,
 DVR, or `.strm` support. See `docs/non-goals.md` for permanent product boundaries.
+
+## Local theme audio
+
+`GET /Items/{id}/ThemeSongs` and `/Users/{userId}/Items/{id}/ThemeSongs`
+return `Items`, `TotalRecordCount`, `StartIndex`, and the resolved `OwnerId`.
+The corresponding `ThemeMedia` routes wrap that result in `ThemeSongsResult`;
+`ThemeVideosResult` and `SoundtrackSongsResult` remain empty. Both discovery
+forms honor `inheritFromParent` and `sortBy=Random`, and recheck item visibility.
+Omitting `inheritFromParent` defaults to `false`, as in Jellyfin.
+Theme IDs are stable numeric encodings that survive a server restart.
+Theme items include `ServerId` and can be fetched through `GET /Items/{id}`
+or `/Users/{userId}/Items/{id}` before playback. These lookups recheck visibility.
+
+The authenticated `GET|HEAD /Audio/{itemId}/stream`,
+`/Audio/{itemId}/stream.{container}`, and `/Audio/{itemId}/universal` routes
+serve theme audio. The original is served, with range and conditional-request
+support, when the accepted containers, codecs, channel limits, and bitrate
+limits permit it. Otherwise the request may receive a progressive AAC
+conversion in audio-only MP4 if it names an MP4 target and accepts AAC: a
+`stream.mp4`/`stream.m4a` route or `container=mp4|m4a` on the stream routes, or
+`TranscodingContainer=mp4|m4a` over HTTP on the universal route. `static=true`
+asks for the original only. The conversion honors `MaxAudioChannels=1` or
+`TranscodingAudioChannels=1`, caps its bitrate at 192 kbps and at any bitrate
+limit in the request, and seeks to `StartTimeTicks`. It has no byte ranges.
+HLS theme transcoding (`TranscodingProtocol=hls`, which Jellyfin Web requests)
+and requests that name no MP4 target return `400 PlaybackUnavailable`.
+Selecting a specific audio stream is unsupported. Transcode fallback hints on
+a universal request do not prevent direct play when the original fits.
+Theme audio follows the playback routing policy like compatibility video: a
+theme routed through a proxy is a `307` redirect to that proxy, and a policy no
+route satisfies answers `503` with the routing-policy or capacity code.
+For universal audio, `Container` declares accepted direct-play formats, including
+`container|codec` entries. `AudioCodec`, `AudioBitRate`, and
+`TranscodingAudioChannels` describe the fallback encoder. When the source bitrate
+is unknown, `MaxStreamingBitrate` uses Jellyfin's conservative 40 Mbps estimate. The
+stream routes treat `AudioCodec` as a constraint on the original audio.
+Themes do not create playback sessions or update watched state.
+
+See [local theme songs](catalog-api.md#local-theme-songs-v2) for file conventions,
+ownership, inheritance, and routing.

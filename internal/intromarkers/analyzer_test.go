@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 )
 
 type fakeIntroRepository struct {
+	mu                 sync.Mutex
 	enabledLibraries   int
 	eligibleCandidates []Candidate
 	episodeCandidates  map[string][]Candidate
@@ -26,27 +28,39 @@ type fakeIntroRepository struct {
 }
 
 func (f *fakeIntroRepository) CountEnabledLibraries(context.Context) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.enabledLibraries, nil
 }
 
 func (f *fakeIntroRepository) ListEligibleCandidates(context.Context) ([]Candidate, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return append([]Candidate(nil), f.eligibleCandidates...), nil
 }
 
 func (f *fakeIntroRepository) ListCandidatesForEpisode(_ context.Context, episodeID string) ([]Candidate, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return append([]Candidate(nil), f.episodeCandidates[episodeID]...), nil
 }
 
 func (f *fakeIntroRepository) ListCandidatesForGroup(_ context.Context, mediaFolderID int, seasonID, analysisGroupKey string) ([]Candidate, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	key := groupKey(mediaFolderID, seasonID, analysisGroupKey)
 	return append([]Candidate(nil), f.groupCandidates[key]...), nil
 }
 
 func (f *fakeIntroRepository) ListChapterSilenceBackfillCandidates(context.Context, int, Config, string) ([]Candidate, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return append([]Candidate(nil), f.backfillCandidates...), nil
 }
 
 func (f *fakeIntroRepository) LoadSilenceRefinementAttempt(_ context.Context, fileID int) (*SilenceRefinementAttempt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	attempt, ok := f.silenceAttempts[fileID]
 	if !ok {
 		return nil, nil
@@ -55,6 +69,8 @@ func (f *fakeIntroRepository) LoadSilenceRefinementAttempt(_ context.Context, fi
 }
 
 func (f *fakeIntroRepository) UpsertSilenceRefinementAttempt(_ context.Context, attempt SilenceRefinementAttempt) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.silenceAttempts == nil {
 		f.silenceAttempts = map[int]SilenceRefinementAttempt{}
 	}
@@ -64,11 +80,15 @@ func (f *fakeIntroRepository) UpsertSilenceRefinementAttempt(_ context.Context, 
 }
 
 func (f *fakeIntroRepository) PatchIntroMarker(_ context.Context, patch IntroMarkerPatch) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.patches = append(f.patches, patch)
 	return true, nil
 }
 
 func (f *fakeIntroRepository) LoadSeasonState(context.Context, SeasonState, Config) (*SeasonState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.seasonState == nil {
 		return nil, nil
 	}
@@ -77,11 +97,15 @@ func (f *fakeIntroRepository) LoadSeasonState(context.Context, SeasonState, Conf
 }
 
 func (f *fakeIntroRepository) UpsertSeasonState(_ context.Context, state SeasonState, _ Config) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.upsertedStates = append(f.upsertedStates, state)
 	return nil
 }
 
 func (f *fakeIntroRepository) LoadFingerprint(_ context.Context, candidate Candidate, _ Config) (*Fingerprint, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	fp := f.fingerprints[candidate.FileID]
 	if fp == nil {
 		return nil, nil
@@ -92,31 +116,41 @@ func (f *fakeIntroRepository) LoadFingerprint(_ context.Context, candidate Candi
 }
 
 func (f *fakeIntroRepository) UpsertFingerprint(context.Context, Fingerprint) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return nil
 }
 
 type fakeFingerprintExtractor struct {
+	mu             sync.Mutex
 	preflightCalls int
 	extractCalls   int
 }
 
 func (f *fakeFingerprintExtractor) Preflight(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.preflightCalls++
 	return nil
 }
 
 func (f *fakeFingerprintExtractor) Extract(context.Context, Candidate) (Fingerprint, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.extractCalls++
 	return Fingerprint{}, false, nil
 }
 
 type fakeBoundaryRefiner struct {
+	mu       sync.Mutex
 	calls    int
 	segments map[int]Segment
 	errors   map[int]error
 }
 
 func (f *fakeBoundaryRefiner) RefineChapterEnd(_ context.Context, candidate Candidate, segment Segment) (Segment, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls++
 	if err := f.errors[candidate.FileID]; err != nil {
 		return segment, false, err
@@ -129,12 +163,19 @@ func (f *fakeBoundaryRefiner) RefineChapterEnd(_ context.Context, candidate Cand
 }
 
 type fakeChromaprintStartRefiner struct {
+	mu       sync.Mutex
 	calls    int
 	segments map[int]Segment
+	errors   map[int]error
 }
 
 func (f *fakeChromaprintStartRefiner) RefineChromaprintStart(_ context.Context, candidate Candidate, segment Segment) (Segment, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls++
+	if err := f.errors[candidate.FileID]; err != nil {
+		return segment, false, err
+	}
 	refined, ok := f.segments[candidate.FileID]
 	if !ok {
 		return segment, false, nil
@@ -523,6 +564,152 @@ func TestAnalyzeEpisodePersistsRefinedChromaprintSegment(t *testing.T) {
 	}
 }
 
+// refinementTestGroup is a three-episode season whose files all share an
+// intro, with cached fingerprints so analysis needs no extraction.
+func refinementTestGroup(cfg Config) (candidateGroup, *fakeIntroRepository) {
+	group := candidateGroup{SeasonID: "season1", MediaFolderID: 7}
+	repo := &fakeIntroRepository{fingerprints: map[int]*Fingerprint{}}
+	for fileID := 1; fileID <= 3; fileID++ {
+		candidate := Candidate{
+			FileID:          fileID,
+			EpisodeID:       fmt.Sprintf("ep%d", fileID),
+			EpisodeNumber:   fileID,
+			SeasonID:        group.SeasonID,
+			MediaFolderID:   group.MediaFolderID,
+			FileHash:        fmt.Sprintf("hash%d", fileID),
+			FileSize:        int64(100 * fileID),
+			DurationSeconds: 1200,
+		}
+		group.Candidates = append(group.Candidates, candidate)
+		repo.fingerprints[fileID] = cachedFingerprint(candidate, cfg, sharedIntroPoints(uint32(1000*fileID)))
+	}
+	group.AnalysisGroupKey = group.Candidates[0].AnalysisGroupKey()
+	return group, repo
+}
+
+func TestAnalyzeGroupKeepsMarkerWhenDialogueRefinementFails(t *testing.T) {
+	cfg := DefaultConfig("ffmpeg")
+	group, repo := refinementTestGroup(cfg)
+	// File 2 already carries a subtitle-refined intro from the previous
+	// version; file 3 has none yet.
+	legacyRefined := "chromaprint:dialogue:v1" //nolint:misspell // Persisted algorithm identifier.
+	group.Candidates[1].IntroMarkersAlgorithm = &legacyRefined
+	refiner := &fakeChromaprintStartRefiner{
+		segments: map[int]Segment{1: {Start: 12.5, End: 36.5, Confidence: 0.85, Algorithm: ChromaprintDialogueAlgorithm}},
+		errors:   map[int]error{2: errors.New("parse subtitle: bad cue"), 3: errors.New("read subtitle: not found")},
+	}
+	analyzer := &Analyzer{
+		repo:               repo,
+		extractor:          &fakeFingerprintExtractor{},
+		chromaprintRefiner: refiner,
+		config:             cfg,
+		logger:             slog.New(slog.DiscardHandler),
+	}
+
+	summary, err := analyzer.analyzeGroup(context.Background(), group, analyzeGroupOptions{persistState: true})
+	if err != nil {
+		t.Fatalf("analyzeGroup returned error: %v", err)
+	}
+	if summary.DialogueRefinementErrors != 2 {
+		t.Fatalf("refinement errors = %d, want 2", summary.DialogueRefinementErrors)
+	}
+	patched := map[int]IntroMarkerPatch{}
+	for _, patch := range repo.patches {
+		patched[patch.FileID] = patch
+	}
+	if _, ok := patched[2]; ok {
+		t.Fatalf("file 2's refinement failed; its refined marker must be left alone, got %+v", patched[2])
+	}
+	if patch, ok := patched[1]; !ok || patch.Algorithm != ChromaprintDialogueAlgorithm {
+		t.Fatalf("file 1 patch = %+v (present %v), want the refined marker", patch, ok)
+	}
+	if patch, ok := patched[3]; !ok || patch.Algorithm != ChromaprintAlgorithm {
+		t.Fatalf("file 3 patch = %+v (present %v), want the unrefined marker for a file with no refined one", patch, ok)
+	}
+	if len(repo.upsertedStates) != 1 {
+		t.Fatalf("expected one season state upsert, got %d", len(repo.upsertedStates))
+	}
+	state := repo.upsertedStates[0]
+	if state.Status != "failed" || state.LastError != "subtitle refinement failed for 2 file(s)" {
+		t.Fatalf("season state = %q (%q), want failed so the next run retries it", state.Status, state.LastError)
+	}
+
+	// The failed state does not satisfy the skip check, so the next run
+	// analyzes the group again.
+	repo.seasonState = &state
+	repo.patches = nil
+	refiner.errors = nil
+	summary, err = analyzer.analyzeGroup(context.Background(), group, analyzeGroupOptions{persistState: true})
+	if err != nil {
+		t.Fatalf("retry returned error: %v", err)
+	}
+	if summary.GroupsSkipped != 0 || len(repo.patches) != 3 {
+		t.Fatalf("retry skipped=%d patches=%d, want the group analyzed and all three files patched", summary.GroupsSkipped, len(repo.patches))
+	}
+	if got := repo.upsertedStates[len(repo.upsertedStates)-1].Status; got != "complete" {
+		t.Fatalf("retry season state = %q, want complete", got)
+	}
+}
+
+func TestAnalyzeGroupRecordsCompleteWhenDialogueRefinementSucceeds(t *testing.T) {
+	cfg := DefaultConfig("ffmpeg")
+	group, repo := refinementTestGroup(cfg)
+	refiner := &fakeChromaprintStartRefiner{
+		segments: map[int]Segment{1: {Start: 12.5, End: 36.5, Confidence: 0.85, Algorithm: ChromaprintDialogueAlgorithm}},
+	}
+	analyzer := &Analyzer{
+		repo:               repo,
+		extractor:          &fakeFingerprintExtractor{},
+		chromaprintRefiner: refiner,
+		config:             cfg,
+		logger:             slog.New(slog.DiscardHandler),
+	}
+
+	summary, err := analyzer.analyzeGroup(context.Background(), group, analyzeGroupOptions{persistState: true})
+	if err != nil {
+		t.Fatalf("analyzeGroup returned error: %v", err)
+	}
+	if summary.DialogueRefinementErrors != 0 || summary.DialogueRefinementsApplied != 1 {
+		t.Fatalf("refinement errors=%d applied=%d, want 0 and 1", summary.DialogueRefinementErrors, summary.DialogueRefinementsApplied)
+	}
+	if len(repo.patches) != 3 {
+		t.Fatalf("expected all three files patched, got %d", len(repo.patches))
+	}
+	if len(repo.upsertedStates) != 1 || repo.upsertedStates[0].Status != "complete" || repo.upsertedStates[0].LastError != "" {
+		t.Fatalf("season states = %+v, want one complete state", repo.upsertedStates)
+	}
+}
+
+type cancelingChromaprintStartRefiner struct {
+	cancel context.CancelFunc
+}
+
+func (r cancelingChromaprintStartRefiner) RefineChromaprintStart(ctx context.Context, _ Candidate, segment Segment) (Segment, bool, error) {
+	r.cancel()
+	return segment, false, ctx.Err()
+}
+
+func TestAnalyzeGroupCancellationIsNotRecordedAsFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := DefaultConfig("ffmpeg")
+	group, repo := refinementTestGroup(cfg)
+	analyzer := &Analyzer{
+		repo:               repo,
+		extractor:          &fakeFingerprintExtractor{},
+		chromaprintRefiner: cancelingChromaprintStartRefiner{cancel: cancel},
+		config:             cfg,
+		logger:             slog.New(slog.DiscardHandler),
+	}
+
+	if _, err := analyzer.analyzeGroup(ctx, group, analyzeGroupOptions{persistState: true}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("analyzeGroup error = %v, want context.Canceled", err)
+	}
+	if len(repo.patches) != 0 || len(repo.upsertedStates) != 0 {
+		t.Fatalf("a canceled run must write nothing, got patches=%+v states=%+v", repo.patches, repo.upsertedStates)
+	}
+}
+
 func TestRunBackfillsExistingChapterMarkerWithSilenceBudget(t *testing.T) {
 	source := models.MarkerSourceScanner
 	algorithm := ChapterAlgorithm
@@ -873,4 +1060,50 @@ func sharedIntroPoints(offset uint32) []uint32 {
 		points[i] = uint32(i)
 	}
 	return points
+}
+
+func TestDialogueRefinementRatesShortenedIntroShort(t *testing.T) {
+	refiner := &fakeChromaprintStartRefiner{segments: map[int]Segment{
+		1: {Start: 45, End: 60, Confidence: chromaprintConsistentConfidence, Algorithm: ChromaprintDialogueAlgorithm},
+	}}
+	analyzer := &Analyzer{chromaprintRefiner: refiner, config: DefaultConfig("ffmpeg"), logger: slog.New(slog.DiscardHandler)}
+	var summary RunSummary
+	refined, err := analyzer.refineChromaprintSegment(context.Background(), Candidate{FileID: 1},
+		Segment{Start: 35, End: 60, Confidence: chromaprintConsistentConfidence, Algorithm: ChromaprintAlgorithm}, &summary)
+	if err != nil {
+		t.Fatalf("refineChromaprintSegment: %v", err)
+	}
+	if refined.Confidence != chromaprintShortConfidence {
+		t.Fatalf("confidence after refinement to %.0fs = %.2f, want %.2f", refined.End-refined.Start, refined.Confidence, chromaprintShortConfidence)
+	}
+}
+
+func TestAnalyzeEpisodeComparesOnlyOwnDetectionFiles(t *testing.T) {
+	cfg := DefaultConfig("ffmpeg")
+	manual := models.MarkerSourceManual
+	start, end := 5.0, 40.0
+	target := Candidate{FileID: 1, EpisodeID: "ep1", SeasonID: "season1", MediaFolderID: 7, FileHash: "h1", FileSize: 1, DurationSeconds: 1200}
+	manualSibling := Candidate{FileID: 2, EpisodeID: "ep2", SeasonID: "season1", MediaFolderID: 7, FileHash: "h2", FileSize: 2, DurationSeconds: 1200,
+		IntroStart: &start, IntroEnd: &end, IntroMarkersSource: &manual}
+	group := groupKey(target.MediaFolderID, target.SeasonID, target.AnalysisGroupKey())
+	repo := &fakeIntroRepository{
+		episodeCandidates: map[string][]Candidate{"ep1": {target}},
+		groupCandidates:   map[string][]Candidate{group: {target, manualSibling}},
+		fingerprints: map[int]*Fingerprint{
+			target.FileID:        cachedFingerprint(target, cfg, sharedIntroPoints(1000)),
+			manualSibling.FileID: cachedFingerprint(manualSibling, cfg, sharedIntroPoints(5000)),
+		},
+	}
+	analyzer := &Analyzer{repo: repo, extractor: &fakeFingerprintExtractor{}, config: cfg}
+
+	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1")
+	if err != nil {
+		t.Fatalf("AnalyzeEpisode: %v", err)
+	}
+	// The scheduled run leaves the manually marked sibling out of the season,
+	// so a single remaining episode has nothing to compare with.
+	if summary.SeasonGroupsConsidered != 0 || len(repo.patches) != 0 {
+		t.Fatalf("groups=%d patches=%d, want the manual sibling excluded as in the scheduled run",
+			summary.SeasonGroupsConsidered, len(repo.patches))
+	}
 }

@@ -114,6 +114,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/taskmanager/tasks"
 	"github.com/Silo-Server/silo-server/internal/taskmanager/triggers"
 	"github.com/Silo-Server/silo-server/internal/telemetry"
+	"github.com/Silo-Server/silo-server/internal/themesongs"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/usercollections"
 	"github.com/Silo-Server/silo-server/internal/userdb"
@@ -1115,6 +1116,7 @@ func main() {
 		} else {
 			srv := transcodenode.NewServer(watcher, tracker)
 			srv.SetInputPathAuthorizer(transcodenode.NewCatalogPathAuthorizer(scanner.NewFileRepository(pool)))
+			srv.SetThemeInputAuthorizer(transcodenode.NewThemeInputAuthorizer(themesongs.NewRepository(pool)))
 			// Consult the session-deny marker central writes on stop, expiry,
 			// and admin terminate before serving or reconstructing a session,
 			// so a revoked stream token stops here instead of at its 24h TTL.
@@ -1284,6 +1286,12 @@ func main() {
 			intromarkers.DefaultConfig(cfg.Playback.FFmpegPath),
 			slog.Default(),
 		)
+		// markers.detection_workers applies without a restart.
+		introAnalyzer := deps.IntroAnalyzer
+		introAnalyzer.SetWorkers(cfg.Markers.DetectionWorkers)
+		configWatcher.OnChange(func(_, updated *config.Config) {
+			introAnalyzer.SetWorkers(updated.Markers.DetectionWorkers)
+		})
 	}
 	if deps.DB != nil {
 		markerRegistry := markers.NewRegistry(slog.Default())
@@ -3129,10 +3137,29 @@ func main() {
 	// Step 7: Build HTTP router with all dependencies.
 	// compatServer is populated after the compat server is constructed below;
 	// the closure captures the pointer so revocation calls reach the live instance.
-	var compatServer *jellycompat.Server
+	var compatServer atomic.Pointer[jellycompat.Server]
+	dropCompatSessions := func(userID int) {
+		if compat := compatServer.Load(); compat != nil {
+			compat.SessionStore().DeleteByUserID(userID)
+		}
+	}
+	// Every replica caches Jellyfin-compatible sessions in memory and serves a
+	// cached one without reading the database, so a revocation is announced on
+	// the admin channel for each replica to drop the account's sessions.
+	if err := eventBus.Subscribe(appCtx, cache.ChannelAdmin, func(event cache.Event) {
+		if event.Type != cache.EventUserSessionsRevoked {
+			return
+		}
+		if userID, err := strconv.Atoi(event.Payload); err == nil {
+			dropCompatSessions(userID)
+		}
+	}); err != nil {
+		slog.Warn("subscribe session revocation failed", "error", err)
+	}
 	deps.OnUserSessionsRevoked = func(ctx context.Context, userID int) {
-		if compatServer != nil {
-			compatServer.SessionStore().DeleteByUserID(userID)
+		dropCompatSessions(userID)
+		if err := eventBus.Publish(ctx, cache.ChannelAdmin, cache.Event{Type: cache.EventUserSessionsRevoked, Payload: strconv.Itoa(userID)}); err != nil {
+			slog.WarnContext(ctx, "publish session revocation failed", "user_id", userID, "error", err)
 		}
 	}
 
@@ -3375,6 +3402,7 @@ func main() {
 
 			if deps.FileRepo != nil {
 				compatDeps.FileResolver = deps.FileRepo
+				compatDeps.MediaSourceOwners = deps.FileRepo
 			}
 
 			compatDeps.SubtitleRepo = subtitles.NewPgRepository(deps.DB, deps.SecretCipher)
@@ -3426,7 +3454,7 @@ func main() {
 		}
 
 		compat := jellycompat.NewServerWithDependencies(compatDeps)
-		compatServer = compat
+		compatServer.Store(compat)
 		compatTerminalRecoveryReady = compat.StartBackgroundTasks(context.Background())
 		compatSrv = compat.HTTPServer()
 		compatSrv.ReadTimeout = 30 * time.Second

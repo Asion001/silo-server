@@ -33,6 +33,11 @@ func TestViewerResolverParityWithLegacyResolver(t *testing.T) {
 		wantDisabled     []int
 		wantNoDisabled   bool
 		wantMetadataLang string
+		// wantMaxAdvisoryAge pins the limit on the policy scope, so a case
+		// cannot pass by both resolvers dropping it.
+		wantMaxAdvisoryAge int
+		// wantRequireAdvisory pins the strict flag the same way.
+		wantRequireAdvisory bool
 	}{
 		{
 			// Hidden libraries are profile-scoped, so a request without a
@@ -72,6 +77,48 @@ func TestViewerResolverParityWithLegacyResolver(t *testing.T) {
 				MaxContentRating:          "PG-13",
 				MaxPlaybackQuality:        "4k",
 				PreferredMetadataLanguage: "fr",
+			},
+			input:          access.ResolveInput{UserID: 1, SessionID: "sess-1", ProfileID: "prof-1"},
+			wantNilAllowed: true,
+		},
+		{
+			// The advisory-age limit rides beside the ceiling through both
+			// resolvers; the DeepEqual below compares the whole scope.
+			name: "profile advisory-age limit",
+			user: &models.User{
+				ID:                   1,
+				AccessPolicyRevision: 5,
+			},
+			profile: &userstore.Profile{
+				ID:               "prof-1",
+				MaxContentRating: "PG-13",
+				MaxAdvisoryAge:   10,
+			},
+			input:              access.ResolveInput{UserID: 1, SessionID: "sess-1", ProfileID: "prof-1"},
+			wantNilAllowed:     true,
+			wantMaxAdvisoryAge: 10,
+		},
+		{
+			name: "profile requires an advisory age",
+			user: &models.User{ID: 1, AccessPolicyRevision: 5},
+			profile: &userstore.Profile{
+				ID:                 "prof-1",
+				MaxAdvisoryAge:     10,
+				RequireAdvisoryAge: true,
+			},
+			input:               access.ResolveInput{UserID: 1, SessionID: "sess-1", ProfileID: "prof-1"},
+			wantNilAllowed:      true,
+			wantMaxAdvisoryAge:  10,
+			wantRequireAdvisory: true,
+		},
+		{
+			// The flag means nothing without a limit, so both resolvers fold
+			// it to false and the scope hashes as if it were never set.
+			name: "required advisory age without a limit",
+			user: &models.User{ID: 1, AccessPolicyRevision: 5},
+			profile: &userstore.Profile{
+				ID:                 "prof-1",
+				RequireAdvisoryAge: true,
 			},
 			input:          access.ResolveInput{UserID: 1, SessionID: "sess-1", ProfileID: "prof-1"},
 			wantNilAllowed: true,
@@ -252,6 +299,12 @@ func TestViewerResolverParityWithLegacyResolver(t *testing.T) {
 			// Always asserted: cases with only the legacy profile column expect
 			// "" — the canonical resolution's contract default — proving the
 			// column is no longer read.
+			if policyScope.MaxAdvisoryAge != tt.wantMaxAdvisoryAge {
+				t.Fatalf("MaxAdvisoryAge = %d, want %d", policyScope.MaxAdvisoryAge, tt.wantMaxAdvisoryAge)
+			}
+			if policyScope.RequireAdvisoryAge != tt.wantRequireAdvisory {
+				t.Fatalf("RequireAdvisoryAge = %v, want %v", policyScope.RequireAdvisoryAge, tt.wantRequireAdvisory)
+			}
 			if policyScope.PreferredMetadataLanguage != tt.wantMetadataLang {
 				t.Fatalf("PreferredMetadataLanguage = %q, want %q", policyScope.PreferredMetadataLanguage, tt.wantMetadataLang)
 			}
@@ -628,6 +681,7 @@ func viewerResolverExpectedInput(
 	if profile != nil {
 		out.ProfilePresent = true
 		out.ProfileMaxRating = profile.MaxContentRating
+		out.ProfileMaxAdvisoryAge = profile.MaxAdvisoryAge
 		out.ProfileMaxQuality = profile.MaxPlaybackQuality
 		out.ProfileLibraryLimited = profile.LibraryRestrictionsEnabled
 		out.ProfileLibraryIDs = cloneViewerResolverInts(profile.AllowedLibraryIDs)

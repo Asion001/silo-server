@@ -26,6 +26,7 @@ import { RouterProvider } from "react-router/dom";
 import { QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { queryClient } from "@/lib/query-client";
 import { AuthProvider, useAuth } from "@/hooks/useAuth";
+import { CHANGE_PASSWORD_PATH } from "@/hooks/usePostSignInNavigation";
 import { useCurrentProfile } from "@/hooks/useCurrentProfile";
 import { useIsActingAdmin } from "@/hooks/useIsActingAdmin";
 import { useNavigationDirection } from "@/hooks/useNavigationDirection";
@@ -62,6 +63,7 @@ import {
 } from "@/pages/catalogSearchParams";
 import { buildLegacyAutoscanRedirectTarget } from "@/pages/autoscanSearchParams";
 import { buildLegacyWebhookSyncRedirectTarget } from "@/lib/webhookSync";
+import { guardRedirectTarget } from "@/lib/authRedirect";
 import { toast } from "sonner";
 import { prewarmCodecDetection } from "@/player/hooks/useCodecDetection";
 import { prefetchRouteChunks, type RouteChunkImport } from "@/lib/routeChunkPrefetch";
@@ -125,6 +127,9 @@ const RecommendationsSection = lazy(() => import("@/pages/RecommendationsSection
 const Calendar = lazy(() => import("@/pages/Calendar"));
 const Signup = lazy(() => import("@/pages/Signup"));
 const InviteClaim = lazy(() => import("@/pages/InviteClaim"));
+const PasswordReset = lazy(() => import("@/pages/PasswordReset"));
+const ForgotPassword = lazy(() => import("@/pages/ForgotPassword"));
+const ChoosePassword = lazy(() => import("@/pages/ChoosePassword"));
 const HouseholdSetup = lazy(() => import("@/pages/HouseholdSetup"));
 const TasteSeed = lazy(() => import("@/pages/TasteSeed"));
 const AppearanceSettings = lazy(() => import("@/pages/settings/AppearanceSettings"));
@@ -227,20 +232,8 @@ function RouteLoading() {
   );
 }
 
-/**
- * Builds a guard redirect target (e.g. "/login") that preserves the current
- * location so the user returns to it after authenticating.
- */
-function guardRedirectTarget(base: string, location: ReturnType<typeof useLocation>): string {
-  const destination = `${location.pathname}${location.search}`;
-  if (destination === "/" || destination === "") {
-    return base;
-  }
-  return `${base}?redirect=${encodeURIComponent(destination)}`;
-}
-
 function RequireAuth({ children }: { children: ReactNode }) {
-  const { user, loading, setupLoading } = useAuth();
+  const { user, pendingPasswordChange, loading, setupLoading } = useAuth();
   const location = useLocation();
   // Setup status only decides where a signed-out visitor goes; a restored
   // session does not wait for it.
@@ -251,6 +244,10 @@ function RequireAuth({ children }: { children: ReactNode }) {
         Loading...
       </div>
     );
+  }
+  // A temporary password confines the session to choosing a new one.
+  if (pendingPasswordChange) {
+    return <Navigate to={guardRedirectTarget(CHANGE_PASSWORD_PATH, location)} replace />;
   }
   if (!user) return <Navigate to={guardRedirectTarget("/login", location)} replace />;
   return <>{children}</>;
@@ -459,6 +456,9 @@ function AppRoutes() {
       <Route path="/setup" element={<SetupWizard />} />
       <Route path="/signup" element={<Signup />} />
       <Route path="/invite/:token" element={<InviteClaim />} />
+      <Route path="/reset-password/:token" element={<PasswordReset />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path={CHANGE_PASSWORD_PATH} element={<ChoosePassword />} />
       {/* Shared Watch Party links: offers the native app on phones, else forwards to /rooms. */}
       <Route path="/rooms/join" element={<WatchPartyInvite />} />
       <Route path="/household-setup" element={<HouseholdSetup />} />
@@ -520,6 +520,7 @@ function AppRoutes() {
                   <Route path="users" element={<AdminUsers />} />
                   <Route path="users/:id" element={<AdminUserDetail />} />
                   <Route path="access-groups" element={<AdminAccessGroups />} />
+                  <Route path="access-groups/:id" element={<AdminAccessGroups />} />
                   <Route path="devices" element={<AdminDevices />} />
                   <Route path="devices/:userId/:deviceId" element={<AdminDevices />} />
                   <Route path="nodes" element={<AdminNodes />} />

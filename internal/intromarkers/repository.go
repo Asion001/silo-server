@@ -140,7 +140,7 @@ func (r *Repository) ListChapterSilenceBackfillCandidates(ctx context.Context, l
 		  AND mf.intro_start IS NOT NULL
 		  AND mf.intro_end IS NOT NULL
 		  AND mf.intro_markers_source = $1
-		  AND mf.intro_markers_algorithm = $2
+		  AND mf.intro_markers_algorithm = ANY($2::text[])
 		  AND NOT COALESCE(
 		      attempts.config_hash = $3
 		      AND attempts.file_hash = COALESCE(mf.file_hash, '')
@@ -156,7 +156,7 @@ func (r *Repository) ListChapterSilenceBackfillCandidates(ctx context.Context, l
 		  mf.id
 		LIMIT $5`,
 		models.MarkerSourceScanner,
-		ChapterAlgorithm,
+		[]string{ChapterAlgorithm, legacyChapterSilenceAlgorithm},
 		cfg.SilenceConfigHash(),
 		silenceAttemptNoImprovement,
 		limit,
@@ -563,7 +563,8 @@ func (r *Repository) LoadSeasonState(ctx context.Context, state SeasonState, cfg
 		       file_count,
 		       status,
 		       markers_written,
-		       COALESCE(last_error, '')
+		       COALESCE(last_error, ''),
+		       analyzed_at
 		FROM intro_season_analysis_state
 		WHERE season_id = $1
 		  AND media_folder_id = $2
@@ -585,6 +586,7 @@ func (r *Repository) LoadSeasonState(ctx context.Context, state SeasonState, cfg
 		&existing.Status,
 		&existing.MarkersWritten,
 		&existing.LastError,
+		&existing.AnalyzedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

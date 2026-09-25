@@ -18,8 +18,10 @@ import (
 // through this method, so a new boundary field added to AccessFilter only has
 // to be captured here — never in per-cache copies that can silently drift.
 //
-// Included: AllowedLibraryIDs, DisabledLibraryIDs, MaxContentRating,
-// AllowUnratedContent, ExcludedMediaTypes, NamePrefix, AllowedContentIDs. AllowedLibraryIDs and
+// Included: AllowedLibraryIDs, DisabledLibraryIDs, every MaturityLimits field
+// (MaxContentRating, AllowUnratedContent, MaxAdvisoryAge, RequireAdvisoryAge),
+// ExcludedMediaTypes,
+// NamePrefix, AllowedContentIDs. AllowedLibraryIDs and
 // AllowedContentIDs preserve the nil (unrestricted) vs empty (restrict to
 // nothing) distinction the access layer branches on; AllowedContentIDs is
 // hashed because the allow-list can be large.
@@ -46,6 +48,18 @@ func (f AccessFilter) WriteAccessScopeCacheKey(b *strings.Builder) {
 	b.WriteString("|unrated=")
 	b.WriteString(strconv.FormatBool(f.AllowUnratedContent))
 
+	// 0 is "no limit", the only value ApplyMaturityLimits skips.
+	b.WriteString("|advisory=")
+	b.WriteString(strconv.Itoa(f.MaxAdvisoryAge))
+
+	// Keyed raw, like the unrated setting, not as HidesUnadvised: that can
+	// only split an entry, never merge two scopes that render different SQL,
+	// and it keeps every field independently visible to the drift guard in
+	// access_cache_key_test.go. The resolvers already fold the flag to false
+	// without a limit, so the extra split does not arise in practice.
+	b.WriteString("|requireadvisory=")
+	b.WriteString(strconv.FormatBool(f.RequireAdvisoryAge))
+
 	b.WriteString("|excludedtypes=")
 	writeSortedStringsKey(b, f.ExcludedMediaTypes)
 
@@ -57,7 +71,7 @@ func (f AccessFilter) WriteAccessScopeCacheKey(b *strings.Builder) {
 }
 
 // contentRatingCeilingCacheKey reduces a maturity ceiling to the three states
-// ApplyContentRatingCeiling actually branches on: no ceiling, a ceiling that
+// ApplyMaturityLimits actually branches on: no ceiling, a ceiling that
 // resolves to no age (deny everything), or a resolved age. Two filters that
 // agree here always produce the same ceiling predicate.
 //

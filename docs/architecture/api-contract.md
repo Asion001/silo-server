@@ -335,7 +335,9 @@ The foundation is `internal/apiv2`. These facts about it are not derivable from 
   then the profile, acting-admin, or permission gate. A gate's denial is re-rendered as the
   matching Problem Details document by switching on the v1 body's machine-readable `error` and
   `reason`; the decision itself is the v1 gate's, and a locked profile keeps its own
-  `profile_verification_required` type so clients still know to ask for the PIN. A gate the
+  `profile_verification_required` type so clients still know to ask for the PIN, and a session
+  holding a temporary password keeps `password_change_required` so clients route to the
+  password change. A gate the
   wiring lacks makes its operations fail closed with `503 dependency_unavailable`; it never
   removes them from the route table. Handlers read claims, profile, and viewer scope from the
   request context and never from headers. Every authenticated class guarantees non-nil
@@ -1237,8 +1239,8 @@ Two findings from the pilot are now settled for every later section:
 
 - **PATCH semantics.** A v1 full-replacement `PUT` becomes a `PATCH` whose members are all
   optional: an omitted member is unchanged, and explicit `null` clears a member only where the
-  schema admits clearing (for `updateProfile`: avatar, PIN, content-rating ceiling, languages,
-  playback ceiling). `null` on any other member is a `422` `validation_failed` naming the member.
+  schema admits clearing (for `updateProfile`: avatar, PIN, content-rating ceiling, advisory-age
+  limit, languages, playback ceiling). `null` on any other member is a `422` `validation_failed` naming the member.
   Because Huma treats `null` on an optional member as absent, the distinction is enforced from the
   raw body. The pilot mutation is naturally idempotent and is not `If-Match` protected;
   optimistic concurrency stays opt-in per operation.
