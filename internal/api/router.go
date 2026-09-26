@@ -2029,6 +2029,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 	if deps.DB != nil {
 		historyRepo := historyimport.NewRepository(deps.DB, deps.SecretCipher)
 		historyImportSvc = historyimport.NewService(deps.AppContext, historyRepo, deps.UserStoreProvider)
+		// One policy for every media server address a user supplies.
+		localNetworkAccess := historyimport.NewLocalNetworkAccess(settingsRepo, historyRepo)
+		historyImportSvc.SetLocalNetworkAccess(localNetworkAccess)
 		historyIdentity := watchstate.NewStableIdentityResolver(itemRepo, episodeRepo, providerIDRepo)
 		historyImportSvc.SetStableIdentityResolver(historyIdentity)
 		if deps.EventsHub != nil {
@@ -2038,6 +2041,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		historyImportHandler = handlers.NewHistoryImportHandler(historyImportSvc)
 		if deps.UserStoreProvider != nil {
 			webhookSyncSvc := webhooksync.NewService(webhooksync.NewRepository(deps.DB, deps.SecretCipher), historyRepo, deps.UserStoreProvider)
+			webhookSyncSvc.SetLocalNetworkAccess(localNetworkAccess)
 			webhookSyncSvc.SetStableIdentityResolver(historyIdentity)
 			webhookSyncHandler = handlers.NewWebhookSyncHandler(webhookSyncSvc)
 		}
@@ -2235,7 +2239,11 @@ func newChiRouter(deps Dependencies) chi.Router {
 	}
 
 	if apiKeyRepo != nil {
-		v2deps.AdminAPIKeys = handlers.NewAPIKeyHandler(apiKeyRepo)
+		adminAPIKeys := handlers.NewAPIKeyHandler(apiKeyRepo)
+		if userRepo != nil {
+			adminAPIKeys.Owners = userRepo
+		}
+		v2deps.AdminAPIKeys = adminAPIKeys
 		v2deps.PersonalAPIKeys = handlers.NewAPIKeyHandler(apiKeyRepo)
 	}
 	if markersHandler != nil {
@@ -4210,6 +4218,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 
 							if apiKeyRepo != nil {
 								apiKeyHandler := handlers.NewAPIKeyHandler(apiKeyRepo)
+								if userRepo != nil {
+									apiKeyHandler.Owners = userRepo
+								}
 								r.Get("/users/{userId}/api-keys", apiKeyHandler.HandleAdminListUserAPIKeys)
 								r.Get("/api-keys", apiKeyHandler.HandleAdminListAllAPIKeys)
 								r.Post("/api-keys", apiKeyHandler.HandleAdminCreateAPIKey)

@@ -2410,6 +2410,8 @@ export interface AdminUser {
   password_login: boolean;
   /** Holds a temporary password it must replace at its next sign-in. */
   password_change_required: boolean;
+  /** The server Owner: only the Owner may change this account. */
+  is_owner: boolean;
   effective_policy: AdminUserEffectivePolicy;
   created_at: string;
   updated_at: string;
@@ -2427,6 +2429,8 @@ export interface CreateUserRequest {
   permissions?: string[];
   create_default_profile?: boolean;
   default_profile_name?: string;
+  /** The account's access group; omitted, a regular account joins the default group. */
+  access_group_id?: number | null;
   library_ids?: number[] | null;
   max_playback_quality?: string;
   max_streams?: number;

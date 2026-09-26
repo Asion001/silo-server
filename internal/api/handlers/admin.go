@@ -327,10 +327,11 @@ type AdminUserView struct {
 	CreatedAt                  time.Time           `json:"created_at"`
 	UpdatedAt                  time.Time           `json:"updated_at"`
 	LastActiveAt               *time.Time          `json:"last_active_at,omitempty"`
-	// PasswordLogin and PasswordChangeRequired are v2-only: the frozen v1
-	// body does not carry them.
+	// PasswordLogin, PasswordChangeRequired and IsOwner are v2-only: the
+	// frozen v1 body does not carry them.
 	PasswordLogin          bool `json:"-"`
 	PasswordChangeRequired bool `json:"-"`
+	IsOwner                bool `json:"-"`
 }
 
 // EffectivePolicyView is the resolved policy block on admin user responses.
@@ -418,6 +419,7 @@ func toAdminUserResponse(u *models.User, group *access.GroupPolicy) AdminUserVie
 		AccessGroupID:              clonePtr(u.AccessGroupID),
 		PasswordLogin:              u.LocalPasswordLoginEnabled && u.PasswordHash != "",
 		PasswordChangeRequired:     u.PasswordChangeRequired,
+		IsOwner:                    u.IsOwner,
 		EffectivePolicy: EffectivePolicyView{
 			LibraryIDs:                 effective.LibraryIDs,
 			MaxPlaybackQuality:         effective.MaxPlaybackQuality,
@@ -984,16 +986,24 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 		AccessGroupID:            req.AccessGroupID.Optional(),
 	}
 
-	if currentUser == nil && updateMayRequireSessionRevocation(updateInput) {
+	if currentUser == nil {
 		if currentUser, blocked = h.loadTargetUser(w, r, id); blocked {
 			return
 		}
+	}
+	if err := auth.CheckOwnerUpdate(actorUserID(r.Context()), currentUser, updateInput); err != nil {
+		writeAPIError(w, ownerError(err))
+		return
 	}
 
 	err = h.userRepo.Update(r.Context(), id, updateInput)
 	if err != nil {
 		if auth.IsNotFound(err) {
 			writeError(w, http.StatusNotFound, "not_found", "User not found")
+			return
+		}
+		if auth.IsDuplicate(err) {
+			writeError(w, http.StatusConflict, "duplicate", "A user with that username or email already exists")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update user")
@@ -1026,6 +1036,14 @@ func (h *AdminHandler) HandleDeleteUser(w http.ResponseWriter, r *http.Request) 
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid user ID")
+		return
+	}
+	target, blocked := h.loadTargetUser(w, r, id)
+	if blocked {
+		return
+	}
+	if err := auth.CheckOwnerDelete(actorUserID(r.Context()), target); err != nil {
+		writeAPIError(w, ownerError(err))
 		return
 	}
 

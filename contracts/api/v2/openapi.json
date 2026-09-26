@@ -14231,6 +14231,10 @@
             "format": "int64",
             "type": "integer"
           },
+          "invalid": {
+            "format": "int64",
+            "type": "integer"
+          },
           "retry_after_seconds": {
             "format": "int64",
             "type": "integer"
@@ -14247,6 +14251,7 @@
         "required": [
           "submitted",
           "skipped",
+          "invalid",
           "failed",
           "retry_after_seconds"
         ],
@@ -15106,6 +15111,13 @@
             "minLength": 1,
             "type": "string"
           },
+          "is_owner": {
+            "description": "Whether the account is the server Owner: the account created at first-run setup, or on servers set up before the Owner existed, the earliest-created enabled admin. Other admins cannot edit, reset the password of, impersonate or manage API keys for it, and it cannot be demoted, disabled or deleted",
+            "examples": [
+              false
+            ],
+            "type": "boolean"
+          },
           "last_active_at": {
             "description": "Most recent recorded activity; null when the account has none",
             "examples": [
@@ -15303,6 +15315,7 @@
           "access_group_id",
           "password_login",
           "password_change_required",
+          "is_owner",
           "effective_policy",
           "created_at",
           "updated_at",
@@ -17383,6 +17396,13 @@
             "format": "int64",
             "type": "integer"
           },
+          "rating_sources": {
+            "description": "Per-source ratings on a 0-100 scale for movies and series, in display order; absent when no provider reported any",
+            "items": {
+              "$ref": "#/components/schemas/CatalogRatingSource"
+            },
+            "type": "array"
+          },
           "rating_tmdb": {
             "format": "double",
             "type": "number"
@@ -17889,6 +17909,33 @@
           "field",
           "op",
           "value"
+        ],
+        "type": "object"
+      },
+      "CatalogRatingSource": {
+        "additionalProperties": false,
+        "properties": {
+          "score": {
+            "description": "Score on a 0-100 scale",
+            "format": "double",
+            "maximum": 100,
+            "minimum": 0,
+            "type": "number"
+          },
+          "source": {
+            "description": "Rating source: imdb, tmdb, rt_critic, rt_audience, metacritic, metacritic_user, letterboxd, trakt, rogerebert, myanimelist, or mdblist. Clients should ignore names they do not recognize.",
+            "type": "string"
+          },
+          "votes": {
+            "description": "Number of votes behind the score, when the source reports it",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source",
+          "score"
         ],
         "type": "object"
       },

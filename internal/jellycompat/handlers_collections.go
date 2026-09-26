@@ -86,6 +86,7 @@ func (h *ItemsHandler) collectionsView() baseItemDTO {
 		Name:                    "Collections",
 		ServerID:                h.mapper.serverID,
 		SortName:                "collections",
+		DisplayPreferencesID:    displayPreferencesID(collectionsViewID),
 		PrimaryImageAspectRatio: &posterAspect,
 		ImageTags:               map[string]string{"Primary": primaryTag},
 		UserData: &itemUserDataDTO{
@@ -341,6 +342,12 @@ func (h *ItemsHandler) handleBoxSetsList(w http.ResponseWriter, r *http.Request,
 		if namePrefix != "" && !strings.HasPrefix(title, namePrefix) {
 			continue
 		}
+		if query.nameLessThan != "" && title >= strings.ToLower(query.nameLessThan) {
+			continue
+		}
+		if query.nameStartsWithOrGreater != "" && title < strings.ToLower(query.nameStartsWithOrGreater) {
+			continue
+		}
 		matched = append(matched, c)
 	}
 
@@ -363,6 +370,9 @@ func (h *ItemsHandler) handleBoxSetsList(w http.ResponseWriter, r *http.Request,
 		pageLimit = clampAuxSearchLimit(query.limit)
 	}
 	page := slicePage(matched, query.startIndex, pageLimit)
+	if query.countOnly {
+		page = nil
+	}
 	items := make([]baseItemDTO, 0, len(page))
 	for _, c := range page {
 		items = append(items, h.boxSetFromCollection(r.Context(), c))
