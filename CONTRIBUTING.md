@@ -162,7 +162,8 @@ GitHub closes the issue when the pull request merges into `main`; the
 or partly addressed issue on `Related issue:`, and write `Related issue: N/A`
 when none applies. Either way, the Problem section has to stand on its own. Keep the commit history intentional and the diff
 limited to the stated problem. Keep the description proportional to the change;
-omit session history, full logs, and private report links. Follow the
+omit session history, full logs, and private report links other than a
+maintainer's `Evidence:` line. Follow the
 [public-content and media rules](AGENTS.md#pull-requests). Screenshots and recordings
 are not routine PR requirements; attach them only when explicitly requested.
 
