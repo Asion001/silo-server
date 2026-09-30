@@ -61,6 +61,10 @@ type ItemsHandler struct {
 	// collections is optional; when set, library collections are exposed as
 	// Jellyfin BoxSets. posterPresigner/presignTTL resolve their artwork keys.
 	collections collectionSource
+	// collectionPosters is optional; when set, BoxSets show each viewer the
+	// collage of the members it can access. Without it, only uploaded and
+	// template posters are shown.
+	collectionPosters CollectionPosterResolver
 	// queryExecutor is optional; when set, smart (live-query) collections
 	// resolve their BoxSet children at read time instead of from stored items.
 	queryExecutor   smartCollectionQueryExecutor
@@ -1869,6 +1873,12 @@ func (h *ItemsHandler) HandleEpisodes(w http.ResponseWriter, r *http.Request) {
 // the result before detail hydration. Only the bounded AdjacentTo window
 // bypasses paging.
 func (h *ItemsHandler) writeSeriesEpisodesResponse(w http.ResponseWriter, r *http.Request, session *Session, query itemsQuery, seriesID, requestedSeasonID string, page bool) {
+	// Jellyfin returns every episode when Limit is absent, and Infuse relies on
+	// that to build its season list; parseItemsQuery's default page size is for
+	// item browsing.
+	if query.limitDefaulted {
+		query.limit = catalog.MaxEpisodePageSize
+	}
 	seasons, err := h.content.ListSeasons(r.Context(), session, seriesID, nil)
 	if err != nil {
 		writeCompatUpstreamError(w, err)
