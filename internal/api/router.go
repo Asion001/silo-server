@@ -89,6 +89,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/taskmanager/repository"
 	"github.com/Silo-Server/silo-server/internal/themedelivery"
 	"github.com/Silo-Server/silo-server/internal/themesongs"
+	"github.com/Silo-Server/silo-server/internal/trickplay"
 	"github.com/Silo-Server/silo-server/internal/usercollections"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchlist"
@@ -141,6 +142,7 @@ type Dependencies struct {
 	}
 	S3Private         *s3client.Client              // private internal bucket client (may be nil)
 	BrandingService   *branding.Service             // white-label branding (nil when DB unavailable)
+	EmailBrand        *mail.BrandLoader             // server branding for outgoing email (nil sends Silo's default)
 	FolderRepo        *catalog.FolderRepository     // media folder repository (may be nil)
 	FileRepo          *scanner.FileRepository       // media file repository (may be nil)
 	Scanner           *scanner.Scanner              // scanner instance (may be nil)
@@ -196,6 +198,9 @@ type Dependencies struct {
 	ScanRegistry              *evt.ScanRegistry
 	LibraryScanQueue          *scanqueue.Service
 	LibraryMonitor            interface{ Poke() }            // real-time library monitor, reconciled after library mutations (nil when this node runs none)
+	Trickplay                 interface{ ReconcileSoon() }   // seek preview service, reconciled after a library's trickplay setting changes (nil when not configured)
+	TrickplayReader           *trickplay.Reader              // published seek previews for players (nil when not configured)
+	TrickplayAdmin            *trickplay.Admin               // seek preview status and regeneration for administrators (nil when not configured)
 	LibraryMonitoring         apiv2.LibraryMonitoringService // real-time monitoring status for the v2 admin read (may be nil)
 	ActivityLogWriter         activitylog.Writer
 	ActivityLogRepo           *activitylog.Repo
@@ -550,6 +555,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 				authService,
 				mail.NewSMTPSender(settingsRepo),
 				settingsRepo,
+				deps.EmailBrand,
 				"",
 			)
 			passwordResetService = passwordreset.NewService(
@@ -558,6 +564,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 				authService,
 				mail.NewSMTPSender(settingsRepo),
 				settingsRepo,
+				deps.EmailBrand,
 				"",
 			)
 			passwordResetService.OnSessionsRevoked(deps.OnUserSessionsRevoked)
@@ -663,6 +670,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		libraryHandler.ScanRegistry = deps.ScanRegistry
 		libraryHandler.ScanQueue = deps.LibraryScanQueue
 		libraryHandler.RealtimeMonitor = deps.LibraryMonitor
+		libraryHandler.Trickplay = deps.Trickplay
 		libraryHandler.MovieMatchQueueRepo = deps.MovieMatchQueueRepo
 		libraryHandler.SeriesMatchQueueRepo = deps.SeriesRootMatchQueueRepo
 		libraryHandler.RawMatchBacklogRepo = deps.FileRepo
@@ -809,6 +817,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 		detailSvc.SetLiteraryWorkLinker(literaryService)
 		detailSvc.SetProbeEnsurer(deps.ProbeEnsurer)
 		detailSvc.SetChapterThumbnailQueuer(deps.ChapterThumbnailQueuer)
+		if deps.TrickplayReader != nil {
+			detailSvc.SetTrickplayAvailability(deps.TrickplayReader)
+		}
 		if deps.ImageResolver != nil {
 			detailSvc.SetImageResolver(deps.ImageResolver)
 		}
@@ -1879,10 +1890,14 @@ func newChiRouter(deps Dependencies) chi.Router {
 		if libraryCollectionService.TraktCollections == nil {
 			// The client ID is resolved per call rather than captured here, so
 			// saving new Trakt credentials applies without a server restart.
-			libraryCollectionService.TraktCollections = &traktCollectionAdapter{
+			adapter := &traktCollectionAdapter{
 				client:   metatrakt.NewClient("", 5),
 				settings: settingsRepo,
 			}
+			if clientIDs, ok := deps.WatchProviderService.(watchProviderAppClientIDs); ok {
+				adapter.watchProviders = clientIDs
+			}
+			libraryCollectionService.TraktCollections = adapter
 		}
 		if tokens, ok := deps.WatchProviderService.(watchProviderAccessTokens); ok && libraryCollectionService.TraktTokenResolver == nil && deps.DB != nil {
 			libraryCollectionService.TraktTokenResolver = &traktCollectionTokenResolver{
@@ -2411,6 +2426,12 @@ func newChiRouter(deps Dependencies) chi.Router {
 	}
 	if itemsHandler != nil {
 		v2deps.Watch = itemsHandler
+		if deps.TrickplayReader != nil {
+			v2deps.Trickplay = deps.TrickplayReader
+		}
+	}
+	if deps.TrickplayAdmin != nil {
+		v2deps.AdminTrickplay = deps.TrickplayAdmin
 	}
 	if profileHandler != nil {
 		v2deps.Profiles = profileHandler
@@ -2620,7 +2641,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 	}
 	var emailHandler *handlers.EmailHandler
 	if settingsRepo != nil {
-		emailHandler = handlers.NewEmailHandler(mail.NewSMTPSender(settingsRepo))
+		emailHandler = handlers.NewEmailHandler(mail.NewSMTPSender(settingsRepo), deps.EmailBrand)
 		v2deps.AdminEmailTests = emailHandler
 	}
 	v2deps.AdminResourceSampler = deps.ResourceSampler
@@ -4808,10 +4829,18 @@ func (a *tmdbListAdapter) GetList(ctx context.Context, id, limit int) ([]catalog
 	return entries, nil
 }
 
-// traktClientIDSettingKey holds the Trakt app client ID. It is deliberately
-// not in config.restartRequiredKeys: the adapter re-reads it before every
-// upstream call, so a saved change converges without a restart.
+// traktClientIDSettingKey holds the Trakt app client ID that the built-in Trakt
+// watch provider used. The adapter falls back to it when no Trakt watch-sync
+// plugin is configured, so a server that uses Trakt only for collections keeps
+// working. It is deliberately not in config.restartRequiredKeys: the adapter
+// re-reads it before every upstream call.
 const traktClientIDSettingKey = "watchsync.trakt.client_id"
+
+// watchProviderAppClientIDs reads the app client ID a watch-sync plugin is
+// configured with.
+type watchProviderAppClientIDs interface {
+	AppClientID(ctx context.Context, providerKey string) (string, error)
+}
 
 // adminJobArtifactURLTTL matches the presigned lifetime an S3 deployment hands
 // out, so the two backends expire a download link on the same schedule.
@@ -4832,16 +4861,31 @@ func newAdminJobArtifactSigner(deps *Dependencies) *artworkurl.Signer {
 
 type traktCollectionAdapter struct {
 	client *metatrakt.Client
-	// settings is the live source of the app client ID. Nil only where no
+	// watchProviders supplies the Trakt watch-sync plugin's app client ID,
+	// the app that issued the profile tokens these calls send. Nil when watch
+	// sync is unavailable.
+	watchProviders watchProviderAppClientIDs
+	// settings is the fallback source of the app client ID. Nil only where no
 	// settings store exists (tests), where the client ID stays empty and the
 	// upstream call fails the same way it always did.
 	settings catalog.SettingsStore
 }
 
-// refreshClientID pushes the currently saved app client ID onto the shared
-// client. A read failure leaves the last known value in place: failing the
-// request at Trakt is more useful than failing it here on a transient DB blip.
+// refreshClientID pushes the current app client ID onto the shared client:
+// the Trakt watch-sync plugin's, else the legacy setting. A read failure
+// leaves the last known value in place: failing the request at Trakt is more
+// useful than failing it here on a transient DB blip.
 func (a *traktCollectionAdapter) refreshClientID(ctx context.Context) {
+	if a.watchProviders != nil {
+		clientID, err := a.watchProviders.AppClientID(ctx, "trakt")
+		if err != nil {
+			return
+		}
+		if clientID != "" {
+			a.client.SetClientID(clientID)
+			return
+		}
+	}
 	if a.settings == nil {
 		return
 	}
