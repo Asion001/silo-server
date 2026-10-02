@@ -185,6 +185,7 @@ function WatchPagePlayer({
   onReturnFromPostRoll,
   watchTogetherRoomId,
   watchTogetherRoomToken,
+  sleepTimer,
 }: WatchPageProps) {
   const config = usePlayerConfig();
   const queryClient = useQueryClient();
@@ -721,6 +722,7 @@ function WatchPagePlayer({
       onReturnFromPostRoll={onReturnFromPostRoll}
       watchTogetherRoomId={watchTogetherRoomId}
       watchTogetherConnection={watchTogetherConnection}
+      sleepTimer={watchTogetherRoomId ? undefined : sleepTimer}
     />
   );
 }

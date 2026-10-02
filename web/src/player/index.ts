@@ -4,6 +4,7 @@
 export { PlayerConfigProvider } from "./context/PlayerConfigContext";
 export type { PlayerConfig } from "./context/PlayerConfigContext";
 export { WatchPage } from "./components/WatchPage";
+export type { SleepSetting } from "./sleepTimer";
 export type {
   WatchPageProps,
   PlayerChapter,
@@ -17,6 +18,7 @@ export type {
   PlayerPictureInPictureChange,
   PlayerPlaybackStateChange,
   PlayerPlaybackTransport,
+  PlayerSleepTimer,
   PlaybackStartTrigger,
   SeriesContext,
   EpisodeRef,

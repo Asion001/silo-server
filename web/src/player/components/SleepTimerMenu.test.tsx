@@ -35,4 +35,42 @@ describe("SleepTimerMenu", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: /end of chapter/i }));
     expect(onChange).toHaveBeenCalledWith({ kind: "end-of-chapter" });
   });
+
+  it("uses the given presets and end option", async () => {
+    const onChange = vi.fn();
+    render(
+      <SleepTimerMenu
+        setting={{ kind: "off" }}
+        remainingMs={null}
+        onChange={onChange}
+        presets={[{ label: "90 min", seconds: 5400 }]}
+        endOption={{ label: "End of episode", setting: { kind: "end-of-item" } }}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /sleep timer/i }));
+    expect(screen.queryByRole("menuitem", { name: "15 min" })).toBeNull();
+    await userEvent.click(screen.getByRole("menuitem", { name: "End of episode" }));
+    expect(onChange).toHaveBeenCalledWith({ kind: "end-of-item" });
+  });
+
+  it("shows only the icon in the icon variant until a countdown runs", () => {
+    const { rerender } = render(
+      <SleepTimerMenu
+        variant="icon"
+        setting={{ kind: "off" }}
+        remainingMs={null}
+        onChange={() => {}}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /sleep timer/i }).textContent).toBe("");
+    rerender(
+      <SleepTimerMenu
+        variant="icon"
+        setting={{ kind: "duration", seconds: 900 }}
+        remainingMs={600_000}
+        onChange={() => {}}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /sleep timer/i })).toHaveTextContent("10:00");
+  });
 });

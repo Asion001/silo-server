@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import {
   Info,
   ListVideo,
@@ -15,6 +15,8 @@ import {
   SkipForward,
   Tags,
   AudioLines,
+  ChevronLeft,
+  Moon,
 } from "lucide-react";
 import { CircleButton } from "./CircleButton";
 import { SeekBar, formatTime } from "./SeekBar";
@@ -23,11 +25,19 @@ import { QualityMenu } from "./QualityMenu";
 import { SubtitleMenu } from "./SubtitleMenu";
 import { AudioTrackMenu } from "./AudioTrackMenu";
 import { ChaptersMenu } from "./ChaptersMenu";
+import { SleepTimerMenu } from "./SleepTimerMenu";
+import {
+  formatSleepCountdown,
+  sleepTimerOptions,
+  useSleepRemainingMs,
+  type SleepSetting,
+} from "../sleepTimer";
 import type {
   MarkerKind,
   MarkerRegionView,
   PlayerAudioTrack,
   PlayerChapter,
+  PlayerSleepTimer,
   PlayerSubtitleInfo,
   QualityOption,
   VideoFitMode,
@@ -113,6 +123,10 @@ interface PlayerControlsProps {
   // Title strip
   title?: string;
   subtitleLabel?: string;
+  // Sleep timer; omitted where it does not apply
+  sleepTimer?: PlayerSleepTimer;
+  /** Label of the "stop when this ends" option, e.g. "End of episode". */
+  sleepEndLabel?: string;
   // Callbacks
   onPlayPause: () => void;
   onSeek: (seconds: number) => void;
@@ -181,6 +195,8 @@ export function PlayerControls({
   onNextEpisode,
   title,
   subtitleLabel,
+  sleepTimer,
+  sleepEndLabel = "End of video",
   onPlayPause,
   onSeek,
   onVolumeChange,
@@ -202,7 +218,13 @@ export function PlayerControls({
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  const [overflowOpen, setOverflowOpen] = useState(false);
+  const [overflowOpen, setOverflowOpenState] = useState(false);
+  // The overflow sheet shows either its action list or the sleep timer choices.
+  const [overflowView, setOverflowView] = useState<"actions" | "sleep">("actions");
+  const setOverflowOpen = (open: boolean) => {
+    setOverflowOpenState(open);
+    if (!open) setOverflowView("actions");
+  };
   const [audioOpen, setAudioOpen] = useState(false);
   const [chaptersOpen, setChaptersOpen] = useState(false);
   // Discard compact menus when switching layouts so they cannot reappear
@@ -212,6 +234,26 @@ export function PlayerControls({
     setAudioOpen(false);
     setChaptersOpen(false);
   }
+  const sleepRemainingMs = useSleepRemainingMs(sleepTimer?.deadlineMs ?? null);
+  const sleepPresets = useMemo(
+    () =>
+      (sleepTimer?.presetMinutes ?? []).map((minutes) => ({
+        label: `${minutes} min`,
+        seconds: minutes * 60,
+      })),
+    [sleepTimer?.presetMinutes],
+  );
+  const sleepEndOption = useMemo(
+    () => ({ label: sleepEndLabel, setting: { kind: "end-of-item" } as SleepSetting }),
+    [sleepEndLabel],
+  );
+  const sleepStatus = !sleepTimer
+    ? null
+    : sleepTimer.setting.kind === "end-of-item"
+      ? sleepEndLabel
+      : sleepRemainingMs != null
+        ? formatSleepCountdown(sleepRemainingMs)
+        : null;
   const handleSkipBack = onSkip.back;
   const handleSkipForward = onSkip.forward;
   // When playing any episode in a series (even the first or last), reserve
@@ -560,6 +602,17 @@ export function PlayerControls({
                 </button>
               )}
 
+              {sleepTimer && (
+                <SleepTimerMenu
+                  variant="icon"
+                  setting={sleepTimer.setting}
+                  remainingMs={sleepRemainingMs}
+                  onChange={sleepTimer.onChange}
+                  presets={sleepPresets}
+                  endOption={sleepEndOption}
+                />
+              )}
+
               <button
                 type="button"
                 className="player-utility-btn"
@@ -622,7 +675,7 @@ export function PlayerControls({
           }}
         />
       )}
-      {compactControls && overflowOpen && (
+      {compactControls && overflowOpen && overflowView === "actions" && (
         <PlayerMenuSurface className="player-overflow-menu" onClose={() => setOverflowOpen(false)}>
           <div className="py-1">
             {!isCoarsePointer && (
@@ -695,6 +748,37 @@ export function PlayerControls({
                 }}
               />
             )}
+            {sleepTimer && (
+              <OverflowAction
+                icon={<Moon className="h-5 w-5" />}
+                label={sleepStatus ? `Sleep timer · ${sleepStatus}` : "Sleep timer"}
+                active={sleepTimer.setting.kind !== "off"}
+                onClick={() => setOverflowView("sleep")}
+              />
+            )}
+          </div>
+        </PlayerMenuSurface>
+      )}
+      {compactControls && overflowOpen && overflowView === "sleep" && sleepTimer && (
+        <PlayerMenuSurface className="player-overflow-menu" onClose={() => setOverflowOpen(false)}>
+          <div className="py-1">
+            <OverflowAction
+              icon={<ChevronLeft className="h-5 w-5" />}
+              label="Back"
+              onClick={() => setOverflowView("actions")}
+            />
+            {sleepTimerOptions(sleepTimer.setting.kind !== "off", sleepPresets, sleepEndOption).map(
+              (option) => (
+                <OverflowAction
+                  key={option.key}
+                  label={option.label}
+                  onClick={() => {
+                    sleepTimer.onChange(option.setting);
+                    setOverflowOpen(false);
+                  }}
+                />
+              ),
+            )}
           </div>
         </PlayerMenuSurface>
       )}
@@ -729,7 +813,7 @@ function OverflowAction({
   active = false,
   onClick,
 }: {
-  icon: ReactNode;
+  icon?: ReactNode;
   label: string;
   active?: boolean;
   onClick: () => void;

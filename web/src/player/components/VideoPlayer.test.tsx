@@ -3661,3 +3661,61 @@ describe("VideoPlayer controls auto-hide", () => {
     expect(controls.current?.visible).toBe(false);
   });
 });
+
+describe("VideoPlayer sleep timer", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T23:00:00Z"));
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  function sleepTimer(deadlineMs: number | null) {
+    return {
+      setting: { kind: "duration" as const, seconds: 900 },
+      deadlineMs,
+      presetMinutes: [15, 30],
+      onChange: vi.fn(),
+      onExpire: vi.fn(),
+      blocksAutoPlayNext: false,
+    };
+  }
+
+  it("pauses playback when the deadline passes and reports the expiry once", () => {
+    const timer = sleepTimer(Date.now() + 15 * 60_000);
+    const { container } = renderPlayer({ sleepTimer: timer });
+    const video = container.querySelector("video")!;
+    vi.mocked(video.pause).mockClear();
+
+    act(() => vi.advanceTimersByTime(15 * 60_000 - 1));
+    expect(timer.onExpire).not.toHaveBeenCalled();
+
+    act(() => vi.advanceTimersByTime(1));
+    expect(video.pause).toHaveBeenCalled();
+    expect(timer.onExpire).toHaveBeenCalledOnce();
+  });
+
+  it("fires at once for a deadline that passed before the player mounted", () => {
+    const timer = sleepTimer(Date.now() - 1_000);
+    renderPlayer({ sleepTimer: timer });
+
+    act(() => vi.advanceTimersByTime(0));
+    expect(timer.onExpire).toHaveBeenCalledOnce();
+  });
+
+  it("stops counting when the timer is turned off", () => {
+    const timer = sleepTimer(Date.now() + 60_000);
+    const { rerenderPlayer } = renderPlayer({ sleepTimer: timer });
+
+    rerenderPlayer({ sleepTimer: { ...timer, setting: { kind: "off" }, deadlineMs: null } });
+    act(() => vi.advanceTimersByTime(120_000));
+    expect(timer.onExpire).not.toHaveBeenCalled();
+  });
+});

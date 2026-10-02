@@ -15,6 +15,8 @@ interface PlayingNextScreenProps {
   nextEpisode?: EpisodeRef;
   continueWatchingItems: ContinueWatchingItem[];
   videoEnded: boolean;
+  /** The sleep timer forbids the countdown; Play Now still works. */
+  autoplayBlocked?: boolean;
   /** Plays the next episode: `viewer` from Play Now or Enter, `automatic` from the countdown. */
   onPlayNow?: (trigger: PlaybackStartTrigger) => void;
   onPlayItem: (contentId: string) => void;
@@ -29,6 +31,7 @@ export function PlayingNextScreen({
   nextEpisode,
   continueWatchingItems,
   videoEnded,
+  autoplayBlocked = false,
   onPlayNow,
   onPlayItem,
   onClose,
@@ -52,7 +55,7 @@ export function PlayingNextScreen({
   }, [onPlayNow]);
 
   useEffect(() => {
-    if (!videoEnded || !autoplay || !nextEpisode) {
+    if (!videoEnded || !autoplay || autoplayBlocked || !nextEpisode) {
       if (countdownRef.current) {
         clearInterval(countdownRef.current);
         countdownRef.current = null;
@@ -75,7 +78,7 @@ export function PlayingNextScreen({
     return () => {
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
-  }, [videoEnded, autoplay, nextEpisode]);
+  }, [videoEnded, autoplay, autoplayBlocked, nextEpisode]);
 
   // -- Keyboard shortcuts --
   useEffect(() => {
@@ -100,7 +103,10 @@ export function PlayingNextScreen({
   // -- Countdown ring SVG --
   const radius = 20;
   const circumference = 2 * Math.PI * radius;
-  const progress = videoEnded && autoplay && nextEpisode ? secondsRemaining / COUNTDOWN_SECONDS : 0;
+  const progress =
+    videoEnded && autoplay && !autoplayBlocked && nextEpisode
+      ? secondsRemaining / COUNTDOWN_SECONDS
+      : 0;
   const strokeDashoffset = circumference * (1 - progress);
 
   const episodeStillUrl = nextEpisode?.stillUrl;
@@ -242,7 +248,7 @@ export function PlayingNextScreen({
                   Play Now
                 </button>
 
-                {videoEnded && autoplay && (
+                {videoEnded && autoplay && !autoplayBlocked && (
                   <motion.div
                     initial={{ opacity: 0, scale: 0.8 }}
                     animate={{ opacity: 1, scale: 1 }}
@@ -276,13 +282,19 @@ export function PlayingNextScreen({
               </motion.div>
 
               {/* Auto-play toggle */}
-              <button
-                onClick={toggleAutoplay}
-                type="button"
-                className="mt-2 text-xs text-white/30 transition-colors hover:text-white/60 sm:mt-2.5"
-              >
-                Auto-play is {autoplay ? "on" : "off"}
-              </button>
+              {autoplayBlocked ? (
+                <div className="mt-2 text-xs text-white/30 sm:mt-2.5">
+                  Sleep timer: the next episode will not start by itself.
+                </div>
+              ) : (
+                <button
+                  onClick={toggleAutoplay}
+                  type="button"
+                  className="mt-2 text-xs text-white/30 transition-colors hover:text-white/60 sm:mt-2.5"
+                >
+                  Auto-play is {autoplay ? "on" : "off"}
+                </button>
+              )}
             </>
           ) : (
             <>

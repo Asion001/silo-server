@@ -58,6 +58,7 @@ import type {
   PlayerPictureInPictureChange,
   PlayerPlaybackStateChange,
   PlayerPlaybackTransport,
+  PlayerSleepTimer,
   PlayerAudioTrack,
   PlayerChapter,
   PlayerFileVersion,
@@ -238,6 +239,7 @@ interface VideoPlayerProps {
   onRealtimeConnectionStateChange?: (state: "disconnected" | "connecting" | "connected") => void;
   watchTogetherRoomId?: string | null;
   watchTogetherConnection?: WatchTogetherRoomConnectionResult;
+  sleepTimer?: PlayerSleepTimer;
 }
 
 const EXIT_PROGRESS_FLUSH_TIMEOUT_MS = 1_000;
@@ -394,6 +396,7 @@ export function VideoPlayer({
   onRealtimeConnectionStateChange,
   watchTogetherRoomId,
   watchTogetherConnection,
+  sleepTimer,
 }: VideoPlayerProps) {
   const playerConfig = usePlayerConfig();
   const isDetached = displayMode !== "foreground";
@@ -416,6 +419,9 @@ export function VideoPlayer({
   const autoSkippedRecapKeyRef = useRef<string | null>(null);
   const lastInputWasKeyboardRef = useRef(false);
   const endedFiredRef = useRef(false);
+  // Set when the sleep timer runs out; a load that has not started yet then
+  // settles paused instead of autoplaying. The next play clears it.
+  const sleepExpiredRef = useRef(false);
   const [hasEnded, setHasEnded] = useState(false);
   const onEndedRef = useRef(onEnded);
   const currentTimeRef = useRef(0);
@@ -1708,7 +1714,7 @@ export function VideoPlayer({
     return autoPlayNextPreview && preview ? preview : credits;
   }, [markerSegments, savedMarkerRegions, duration, autoPlayNextPreview, preview, credits]);
   const nextEpisode = useNextEpisode(
-    roomPlaybackActive ? null : autoplayMarker,
+    roomPlaybackActive || sleepTimer?.blocksAutoPlayNext ? null : autoplayMarker,
     roomPlaybackActive ? undefined : seriesContext,
     currentTime,
     handleNavigate,
@@ -1890,7 +1896,7 @@ export function VideoPlayer({
       // the current frame. Starting earlier can produce a visible first-frame
       // freeze where audio advances before video begins moving.
       if (video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) return;
-      if (!shouldAutoPlay) {
+      if (!shouldAutoPlay || sleepExpiredRef.current) {
         settlePaused();
         return;
       }
@@ -2150,6 +2156,7 @@ export function VideoPlayer({
         video.pause();
         return;
       }
+      sleepExpiredRef.current = false;
       setPlaying(true);
     };
     const onPause = () => {
@@ -2842,6 +2849,27 @@ export function VideoPlayer({
     },
     [sessionId, showWatchTogetherNotice, watchTogether, watchTogetherRoomId, watchTogetherSync],
   );
+
+  // -- Sleep timer --
+  // The deadline is wall-clock and owned by the host, so a remount between
+  // episodes re-arms it and a deadline that passed meanwhile fires at once.
+  const sleepDeadlineMs = sleepTimer?.deadlineMs ?? null;
+  const onSleepExpireRef = useRef(sleepTimer?.onExpire);
+  useEffect(() => {
+    onSleepExpireRef.current = sleepTimer?.onExpire;
+  }, [sleepTimer?.onExpire]);
+  useEffect(() => {
+    if (sleepDeadlineMs == null) return;
+    const timer = setTimeout(
+      () => {
+        sleepExpiredRef.current = true;
+        videoRef.current?.pause();
+        onSleepExpireRef.current?.();
+      },
+      Math.max(0, sleepDeadlineMs - Date.now()),
+    );
+    return () => clearTimeout(timer);
+  }, [sleepDeadlineMs]);
 
   // Zero-argument form for button and keyboard handlers, which pass the
   // click event as the first argument.
@@ -3984,6 +4012,8 @@ export function VideoPlayer({
           onNextEpisode={nextEpisode.skipToNext}
           title={hudTitle}
           subtitleLabel={hudSubtitle}
+          sleepTimer={sleepTimer}
+          sleepEndLabel={seriesContext ? "End of episode" : "End of movie"}
         />
       )}
 

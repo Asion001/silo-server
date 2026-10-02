@@ -3,6 +3,8 @@
  * Zero imports from app-specific code.
  */
 
+import type { SleepSetting } from "./sleepTimer";
+
 /** Subtitle display mode. */
 export type SubtitleMode = "off" | "auto" | "always";
 
@@ -254,6 +256,23 @@ export interface PlayerPlaybackTransport {
  */
 export type PlaybackStartTrigger = "viewer" | "automatic";
 
+/**
+ * The video sleep timer. The host owns it so it survives the player
+ * remounting between episodes; the player enforces it.
+ */
+export interface PlayerSleepTimer {
+  setting: SleepSetting;
+  /** Wall-clock deadline (epoch ms) of a duration timer; null for any other setting. */
+  deadlineMs: number | null;
+  /** Durations the menu offers, in minutes. */
+  presetMinutes: number[];
+  onChange: (next: SleepSetting) => void;
+  /** A duration timer ran out. The player has already paused. */
+  onExpire: () => void;
+  /** True while the timer forbids starting the next episode on its own. */
+  blocksAutoPlayNext: boolean;
+}
+
 /** Props for the top-level WatchPage component. */
 export interface WatchPageProps {
   contentId: string;
@@ -309,6 +328,8 @@ export interface WatchPageProps {
   onPlaybackStateChange?: (state: PlayerPlaybackStateChange) => void;
   onPlaybackTransportReady?: (transport: PlayerPlaybackTransport | null) => void;
   onReturnFromPostRoll?: () => void;
+  /** Omitted where a sleep timer does not apply, such as a Watch Together room. */
+  sleepTimer?: PlayerSleepTimer;
 }
 
 /** A quality option shown in the player settings menu. */

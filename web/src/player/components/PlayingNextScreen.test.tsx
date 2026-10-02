@@ -163,6 +163,19 @@ describe("PlayingNextScreen next-episode start", () => {
     expect(onPlayNow).toHaveBeenCalledWith("automatic");
   });
 
+  it("does not start the next episode on its own while the sleep timer blocks autoplay", () => {
+    vi.useFakeTimers();
+    const onPlayNow = vi.fn();
+    renderScreen({ videoEnded: true, autoplayBlocked: true, onPlayNow });
+
+    act(() => vi.advanceTimersByTime(30_000));
+
+    expect(onPlayNow).not.toHaveBeenCalled();
+    expect(screen.getByText(/sleep timer/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Play Now" }));
+    expect(onPlayNow).toHaveBeenCalledWith("viewer");
+  });
+
   it("starts the next episode as the viewer's start from Play Now or Enter", () => {
     const onPlayNow = vi.fn();
     renderScreen({ onPlayNow });

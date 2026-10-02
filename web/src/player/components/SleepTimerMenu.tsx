@@ -1,36 +1,35 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Moon } from "lucide-react";
+import {
+  formatSleepCountdown,
+  sleepTimerOptions,
+  type SleepSetting,
+  type SleepTimerPreset,
+} from "../sleepTimer";
 
-export type SleepSetting =
-  | { kind: "off" }
-  | { kind: "duration"; seconds: number }
-  | { kind: "end-of-chapter" };
+export type { SleepSetting } from "../sleepTimer";
 
 interface SleepTimerMenuProps {
   setting: SleepSetting;
   remainingMs: number | null;
   onChange: (next: SleepSetting) => void;
+  presets?: SleepTimerPreset[];
+  /** The "stop at the end" option. Defaults to end of chapter. */
+  endOption?: { label: string; setting: SleepSetting };
+  /** `icon` shows only the moon until a countdown is running, to fit an icon rail. */
+  variant?: "labeled" | "icon";
 }
 
-const PRESETS: { label: string; seconds: number }[] = [
-  { label: "5 min", seconds: 300 },
-  { label: "15 min", seconds: 900 },
-  { label: "30 min", seconds: 1800 },
-  { label: "45 min", seconds: 2700 },
-  { label: "60 min", seconds: 3600 },
-];
-
-function formatCountdown(ms: number): string {
-  const total = Math.max(0, Math.ceil(ms / 1000));
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-export function SleepTimerMenu({ setting, remainingMs, onChange }: SleepTimerMenuProps) {
+export function SleepTimerMenu({
+  setting,
+  remainingMs,
+  onChange,
+  presets,
+  endOption,
+  variant = "labeled",
+}: SleepTimerMenuProps) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const itemsRef = useRef<(HTMLButtonElement | null)[]>([]);
   const armed = setting.kind !== "off";
 
   const handleBlur = useCallback((e: React.FocusEvent) => {
@@ -44,20 +43,29 @@ export function SleepTimerMenu({ setting, remainingMs, onChange }: SleepTimerMen
     return () => document.removeEventListener("keydown", onKey);
   }, [open]);
 
-  const label = armed && remainingMs != null ? `Sleep ${formatCountdown(remainingMs)}` : "Sleep";
+  const countdown = armed && remainingMs != null ? formatSleepCountdown(remainingMs) : null;
+  const label = countdown
+    ? variant === "icon"
+      ? countdown
+      : `Sleep ${countdown}`
+    : variant === "icon"
+      ? null
+      : "Sleep";
 
   return (
     <div ref={menuRef} className="relative" onBlur={handleBlur}>
       <button
         type="button"
-        className="player-utility-btn flex items-center gap-1.5 px-2 text-xs"
+        className={`player-utility-btn flex items-center gap-1.5 ${label ? "px-2" : ""} text-xs`}
         onClick={() => setOpen((v) => !v)}
         aria-label="Sleep timer"
         aria-expanded={open}
         aria-haspopup="menu"
+        title={variant === "icon" ? "Sleep timer" : undefined}
+        data-active={armed ? "true" : "false"}
       >
-        <Moon className="h-3.5 w-3.5" />
-        <span className="tabular-nums">{label}</span>
+        <Moon className={variant === "icon" ? "h-[18px] w-[18px]" : "h-3.5 w-3.5"} />
+        {label && <span className="tabular-nums">{label}</span>}
       </button>
 
       {open && (
@@ -65,50 +73,20 @@ export function SleepTimerMenu({ setting, remainingMs, onChange }: SleepTimerMen
           role="menu"
           className="absolute right-0 bottom-full z-30 mb-2 flex min-w-[160px] flex-col overflow-hidden rounded-lg bg-black/90 py-1.5 shadow-xl backdrop-blur-sm"
         >
-          {armed && (
+          {sleepTimerOptions(armed, presets, endOption).map((option) => (
             <button
-              ref={(el) => {
-                itemsRef.current[0] = el;
-              }}
+              key={option.key}
               role="menuitem"
               type="button"
               className="w-full px-4 py-2 text-left text-sm text-white/85 hover:bg-white/10"
               onClick={() => {
-                onChange({ kind: "off" });
+                onChange(option.setting);
                 setOpen(false);
               }}
             >
-              Turn off
-            </button>
-          )}
-          {PRESETS.map((p, i) => (
-            <button
-              key={p.seconds}
-              ref={(el) => {
-                itemsRef.current[(armed ? 1 : 0) + i] = el;
-              }}
-              role="menuitem"
-              type="button"
-              className="w-full px-4 py-2 text-left text-sm text-white/85 hover:bg-white/10"
-              onClick={() => {
-                onChange({ kind: "duration", seconds: p.seconds });
-                setOpen(false);
-              }}
-            >
-              {p.label}
+              {option.label}
             </button>
           ))}
-          <button
-            role="menuitem"
-            type="button"
-            className="w-full px-4 py-2 text-left text-sm text-white/85 hover:bg-white/10"
-            onClick={() => {
-              onChange({ kind: "end-of-chapter" });
-              setOpen(false);
-            }}
-          >
-            End of chapter
-          </button>
         </div>
       )}
     </div>

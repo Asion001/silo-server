@@ -60,6 +60,7 @@ import { WatchPlaybackControllerContext } from "./watchPlaybackContext";
 import type { WatchPlaybackControllerValue } from "./watchPlaybackContext";
 import type { WatchPlaybackTransportControls } from "./watchPlaybackReducer";
 import { createEmptyPlaybackState, watchPlaybackReducer } from "./watchPlaybackReducer";
+import { useVideoSleepTimer } from "./useVideoSleepTimer";
 import {
   createWatchPlaybackSnapshotStore,
   useWatchPlaybackSnapshot,
@@ -561,6 +562,7 @@ function WatchPlaybackHostContent() {
       // The bandwidth cap that pairs with it; the player keeps its startup
       // tier under this so the setting does what its label says.
       SETTING_KEYS.PLAYBACK_MAX_BITRATE_KBPS,
+      SETTING_KEYS.PLAYER_SLEEP_TIMER_DEFAULT_MINUTES,
     ],
     enabled: signedIn,
   });
@@ -839,6 +841,15 @@ function WatchPlaybackHostContent() {
     setPostRollVideoEnded(false);
   }, [requestKeyValue]);
 
+  // -- Sleep timer --
+  const sleepTimer = useVideoSleepTimer(
+    request != null ? requestKeyValue : null,
+    effectivePlaybackSettings?.[SETTING_KEYS.PLAYER_SLEEP_TIMER_DEFAULT_MINUTES]?.value as
+      | number
+      | undefined,
+  );
+  const { consumeEndOfItem: consumeSleepEndOfItem } = sleepTimer;
+
   // -- Handle video ended → enter post-roll or exit --
   const handleEnded = useCallback(
     (exitState?: PlaybackExitState) => {
@@ -871,6 +882,9 @@ function WatchPlaybackHostContent() {
         return;
       }
 
+      // "End of item" is spent now; nothing plays on by itself after this.
+      consumeSleepEndOfItem();
+
       // If post-roll was shown before the video ended, wait for the real
       // `ended` event before starting the autoplay countdown.
       if (modeRef.current === "post-roll") {
@@ -902,6 +916,7 @@ function WatchPlaybackHostContent() {
       stopPlayback,
       navigate,
       controller,
+      consumeSleepEndOfItem,
     ],
   );
 
@@ -1096,6 +1111,7 @@ function WatchPlaybackHostContent() {
           onPlaybackTransportReady={handlePlaybackTransportReady}
           seekIntervals={{ back: seekPreferences.skipBack, forward: seekPreferences.skipForward }}
           onReturnFromPostRoll={isPostRoll ? handleReturnFromPostRoll : undefined}
+          sleepTimer={inRoom ? undefined : sleepTimer.player}
         />
       </Suspense>
       {isPostRoll && (
@@ -1107,6 +1123,7 @@ function WatchPlaybackHostContent() {
               nextEpisode={nextEpisodeRef ?? undefined}
               continueWatchingItems={continueWatchingItems}
               videoEnded={postRollVideoEnded}
+              autoplayBlocked={sleepTimer.player.blocksAutoPlayNext}
               onPlayNow={
                 nextEpisodeRef
                   ? (trigger) => handleNavigateEpisode(nextEpisodeRef.contentId, trigger)
