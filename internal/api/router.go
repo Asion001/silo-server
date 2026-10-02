@@ -1383,6 +1383,25 @@ func newChiRouter(deps Dependencies) chi.Router {
 			}
 		}
 		subtitleAINotifier = playback.NewSubtitleReadyNotifier(deps.SessionMgr, realtimeHub, subtitleInventoryResolver)
+		if subtitleAINotifier != nil && deps.EventBus != nil {
+			publish := func(ctx context.Context, payload string) error {
+				return deps.EventBus.Publish(ctx, cache.ChannelPlayback, cache.Event{Type: cache.EventSubtitleTimingChanged, Payload: payload})
+			}
+			subscribe := func(ctx context.Context, handler func(string)) error {
+				return deps.EventBus.Subscribe(ctx, cache.ChannelPlayback, func(event cache.Event) {
+					if event.Type == cache.EventSubtitleTimingChanged {
+						handler(event.Payload)
+					}
+				})
+			}
+			busCtx := deps.AppContext
+			if busCtx == nil {
+				busCtx = context.Background()
+			}
+			if err := subtitleAINotifier.UseEventBus(busCtx, publish, subscribe); err != nil {
+				slog.Warn("subscribe subtitle timing changes failed", "component", "api", "error", err)
+			}
+		}
 		adminPlaybackControlHandler = handlers.NewAdminPlaybackControlHandler(playbackHandler)
 
 		if deps.DB != nil && deps.FileRepo != nil && viewerResolver != nil && deps.Config != nil && detailSvc != nil {
@@ -1482,7 +1501,6 @@ func newChiRouter(deps Dependencies) chi.Router {
 	}
 	if accessGroupStore != nil {
 		accessGroupHandler = handlers.NewAccessGroupHandler(accessGroupStore)
-		accessGroupHandler.OnUserSessionsRevoked = deps.OnUserSessionsRevoked
 	}
 	if deps.DB != nil {
 		jobRepo := adminjob.NewRepository(deps.DB)
@@ -1654,6 +1672,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 
 		mediaResolver := &pgSubtitleMediaResolver{pool: deps.DB}
 		subtitleSearchHandler = handlers.NewSubtitleSearchHandler(subtitleManager, subtitleRepo, mediaResolver)
+		if deps.FileRepo != nil && settingsRepo != nil {
+			subtitleSearchHandler.SetSyncService(newSubtitleSyncService(&deps, subtitleManager, subtitleRepo, settingsRepo, subtitleAINotifier))
+		}
 	}
 
 	if adminSubtitleHandler != nil && deps.DB != nil && subtitleManager != nil {
@@ -2776,6 +2797,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.ViewerSubtitleDelete = subtitleSearchHandler
 		v2deps.SubtitleDownloads = subtitleSearchHandler
 		v2deps.SubtitleUploads = subtitleSearchHandler
+		v2deps.SubtitleSync = subtitleSearchHandler
 	}
 	if subtitleAIHandler != nil {
 		v2deps.SubtitleAIReads = subtitleAIHandler
@@ -3129,6 +3151,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 						historyImportSvc,
 					)
 					eventsHandler.SetNotificationsSystem(deps.Notifications)
+					if sessionRepo != nil {
+						eventsHandler.SetSessionRoles(sessionRepo)
+					}
 					r.Get("/events/ws", eventsHandler.HandleWebSocket)
 					r.Get("/events/capability", eventsHandler.HandleCapability)
 				}
@@ -4613,11 +4638,14 @@ func resolveOptionalPluginAccessUser(
 	if claims.PasswordChangeRequired {
 		return false, false, 0, ""
 	}
-	valid, err := sessionRepo.IsValid(r.Context(), claims.SessionID)
-	if err != nil || !valid {
+	// Plugin launch tokens copy the role of the access token they were minted
+	// from, and a role change keeps the session, so admin access follows the
+	// account's current role rather than the token's.
+	role, active, err := sessionRepo.ActiveSessionRole(r.Context(), claims.SessionID)
+	if err != nil || !active {
 		return false, false, 0, ""
 	}
-	return true, claims.Role == "admin", claims.UserID, claims.ProfileID
+	return true, role == "admin", claims.UserID, claims.ProfileID
 }
 
 // NewTMDBCollectionFetcher creates a TMDBCollectionFetcher from an API key.
