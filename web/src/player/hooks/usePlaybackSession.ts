@@ -195,8 +195,18 @@ export interface UsePlaybackSessionResult extends PlaybackSessionState {
   refreshSubtitles: (currentPosition: number) => void;
   /** Folds a realtime-delivered inventory entry in without a server round trip. */
   applySubtitleTrack: (track: SubtitleInventoryItemV3) => void;
-  /** Keeps transport state current for output-capability replans. */
+  /**
+   * Keeps transport state current for output-capability replans. Ignored
+   * until the current request's plan is adopted: the transport still on
+   * screen then belongs to the request being replaced.
+   */
   updatePlaybackState: (positionSeconds: number, playing: boolean) => void;
+  /**
+   * Whether the transport on screen belongs to the current request. False
+   * from a request change until its plan is adopted, while the previous
+   * request's media keeps playing out and may end.
+   */
+  ownsTransport: () => boolean;
   /**
    * Called when a transport shows its first frame. Reports `first_frame` once
    * per playback attempt, with `first_frame_ms` measured from the viewer's
@@ -1687,6 +1697,10 @@ export function usePlaybackSession(
   );
 
   const updatePlaybackState = useCallback((positionSeconds: number, playing: boolean) => {
+    // The previous request's media keeps playing while the next one starts,
+    // and can pause or end meanwhile. That is not the viewer pausing the
+    // request that replaced it, nor its position.
+    if (!hasAdoptedPlanRef.current) return;
     if (Number.isFinite(positionSeconds) && positionSeconds >= 0) {
       const isUninitializedPlayerZero =
         awaitingInitialPlayerPositionRef.current &&
@@ -1705,6 +1719,8 @@ export function usePlaybackSession(
       playbackPlayingRef.current = false;
     }
   }, []);
+
+  const ownsTransport = useCallback(() => hasAdoptedPlanRef.current, []);
 
   const reportFirstFrame = useCallback(() => {
     // The current plan's transport is on screen: from here its reported state
@@ -1769,6 +1785,7 @@ export function usePlaybackSession(
     refreshSubtitles,
     applySubtitleTrack,
     updatePlaybackState,
+    ownsTransport,
     reportFirstFrame,
     reportEvent,
   };

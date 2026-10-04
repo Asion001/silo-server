@@ -355,7 +355,11 @@ function WatchPagePlayer({
     refresh();
   }, [refetchTrickplay, session.mediaFileId, trickplayQuery.isError]);
 
+  const ownsTransport = session.ownsTransport;
   const handleEnded = useCallback(() => {
+    // The previous request's media ending while the next one starts is not
+    // the end of the item now playing.
+    if (!ownsTransport()) return;
     onEnded?.({
       positionSeconds: session.durationSeconds ?? 0,
       durationSeconds: session.durationSeconds ?? undefined,
@@ -365,7 +369,7 @@ function WatchPagePlayer({
       lastCodecVideo: activePlaybackVersion?.codec_video,
       lastEditionKey: activePlaybackVersion?.edition_key,
     });
-  }, [activePlaybackVersion, onEnded, session.durationSeconds, session.mediaFileId]);
+  }, [activePlaybackVersion, onEnded, ownsTransport, session.durationSeconds, session.mediaFileId]);
 
   const handleSwitchAudio = useCallback(
     (index: number, currentPosition: number) => {
@@ -377,10 +381,14 @@ function WatchPagePlayer({
   const updatePlaybackState = session.updatePlaybackState;
   const handlePlaybackStateChange = useCallback(
     (state: PlayerPlaybackStateChange) => {
+      // Until the next request's plan arrives, the state on screen is the
+      // previous request's: reporting it under the new one would carry its
+      // pause, end or position into the item that replaced it.
+      if (!ownsTransport()) return;
       updatePlaybackState(state.currentTime, state.playing);
       onPlaybackStateChange?.(state);
     },
-    [onPlaybackStateChange, updatePlaybackState],
+    [onPlaybackStateChange, ownsTransport, updatePlaybackState],
   );
 
   /**

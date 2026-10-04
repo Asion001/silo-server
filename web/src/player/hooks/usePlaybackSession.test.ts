@@ -1440,6 +1440,66 @@ describe("usePlaybackSession version switches", () => {
     unmount();
   });
 
+  // Play Now on the next episode keeps the previous episode playing until the
+  // new plan arrives. That episode reaching its end and pausing meanwhile is
+  // not the viewer pausing, so the next episode still starts playing.
+  it("autoplays the next request when the previous transport pauses while it starts", async () => {
+    let releaseSecondStart: ((response: Response) => void) | undefined;
+    let startCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/playback/start")) {
+        startCount += 1;
+        const sessionId = `session-${startCount}`;
+        const response = jsonResponse(
+          {
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "playable",
+            session_id: sessionId,
+            playback_plan: fixturePlanV3({ session_id: sessionId }),
+          },
+          { status: 201 },
+        );
+        if (startCount === 1) return response;
+        return new Promise<Response>((resolve) => {
+          releaseSecondStart = () => resolve(response);
+        });
+      }
+      if (url.endsWith("/playback/route-events")) return new Response(null, { status: 202 });
+      if (init?.method === "DELETE") return jsonResponse({ outcome: "stopped" });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, rerender, unmount } = renderHook(
+      ({ requestKey, fileId }: { requestKey: string; fileId: number }) =>
+        usePlaybackSession(requestKey, [], [], fileId, 0, false, "auto"),
+      { wrapper, initialProps: { requestKey: "episode-1", fileId: 7 } },
+    );
+    await waitFor(() => expect(result.current.sessionId).toBe("session-1"));
+    act(() => {
+      result.current.reportFirstFrame();
+      result.current.updatePlaybackState(1300, true);
+    });
+    expect(result.current.ownsTransport()).toBe(true);
+
+    rerender({ requestKey: "episode-2", fileId: 8 });
+    await waitFor(() => expect(releaseSecondStart).toBeDefined());
+    expect(result.current.ownsTransport()).toBe(false);
+    act(() => {
+      result.current.updatePlaybackState(1310, true);
+      result.current.updatePlaybackState(1320, false);
+    });
+
+    act(() => releaseSecondStart?.(new Response()));
+    await waitFor(() => expect(result.current.sessionId).toBe("session-2"));
+    expect(result.current.shouldAutoPlay).toBe(true);
+    expect(result.current.ownsTransport()).toBe(true);
+
+    unmount();
+  });
+
   it("clears and stops the previous session when a replacement start request fails", async () => {
     const startBodies: Array<{ playback_attempt_id: string; start_position?: number }> = [];
     const stoppedSessions: string[] = [];

@@ -128,6 +128,7 @@ function playbackSession(
     refreshSubtitles: vi.fn(),
     applySubtitleTrack: vi.fn(),
     updatePlaybackState: vi.fn(),
+    ownsTransport: () => true,
     reportFirstFrame: vi.fn(),
     reportEvent: vi.fn(),
     ...overrides,
