@@ -80,6 +80,8 @@ interface PlayerControlsProps {
   muted: boolean;
   isFullscreen: boolean;
   videoFit: VideoFitMode;
+  /** Fill is unavailable because subtitles are burned into the picture. */
+  videoFitLocked?: boolean;
   onVideoFitToggle: () => void;
   // Subtitles
   subtitleTracks: PlayerSubtitleInfo[];
@@ -160,6 +162,7 @@ export function PlayerControls({
   muted,
   isFullscreen,
   videoFit,
+  videoFitLocked = false,
   onVideoFitToggle,
   subtitleTracks,
   activeSubtitleIndex,
@@ -639,9 +642,10 @@ export function PlayerControls({
                 type="button"
                 className="player-utility-btn"
                 onClick={onVideoFitToggle}
+                disabled={videoFitLocked}
                 aria-label="Fill screen"
                 aria-pressed={videoFit === "cover"}
-                title="Fill screen"
+                title={videoFitLocked ? FILL_LOCKED_HINT : "Fill screen"}
                 data-active={videoFit === "cover" ? "true" : "false"}
               >
                 <Scaling className="h-[18px] w-[18px]" />
@@ -732,6 +736,8 @@ export function PlayerControls({
               icon={<Scaling className="h-5 w-5" />}
               label="Fill screen"
               active={videoFit === "cover"}
+              disabled={videoFitLocked}
+              title={videoFitLocked ? FILL_LOCKED_HINT : undefined}
               onClick={() => {
                 onVideoFitToggle();
                 setOverflowOpen(false);
@@ -807,23 +813,31 @@ export function PlayerControls({
   );
 }
 
+const FILL_LOCKED_HINT = "Fill screen is off while subtitles are burned into the video";
+
 function OverflowAction({
   icon,
   label,
   active = false,
+  disabled = false,
+  title,
   onClick,
 }: {
   icon?: ReactNode;
   label: string;
   active?: boolean;
+  disabled?: boolean;
+  title?: string;
   onClick: () => void;
 }) {
   return (
     <button
       role="menuitem"
       type="button"
-      className={`flex min-h-12 w-full items-center gap-3 px-5 py-3 text-left text-sm ${active ? "bg-white/10 text-white" : "text-white/80"}`}
+      className={`flex min-h-12 w-full items-center gap-3 px-5 py-3 text-left text-sm disabled:cursor-not-allowed disabled:opacity-40 ${active ? "bg-white/10 text-white" : "text-white/80"}`}
       onClick={onClick}
+      disabled={disabled}
+      title={title}
     >
       {icon}
       <span>{label}</span>

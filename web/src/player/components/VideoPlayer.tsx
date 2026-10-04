@@ -2677,11 +2677,16 @@ export function VideoPlayer({
 
   // -- Subtitle appearance --
   const { settings: subtitleSettings, containerStyle, cueStyle } = useSubtitleAppearance();
+  // Burned-in subtitles are part of the picture, so Fill's crop would cut
+  // them off. Show the whole frame while they are on and keep the viewer's
+  // Fill choice for when they turn off.
+  const subtitlesBurnedIn = plan.subtitle.mode === "burn_in";
+  const effectiveVideoFit: VideoFitMode = subtitlesBurnedIn ? "contain" : videoFit;
   const {
     positionStyle: subtitlePositionStyle,
     fontScale: subtitleFontScale,
     coverCrop,
-  } = useSubtitleLayout(containerRef, videoRef, subtitleSettings.position, videoFit);
+  } = useSubtitleLayout(containerRef, videoRef, subtitleSettings.position, effectiveVideoFit);
   // Scale cue text with the rendered video so subtitles stay proportionally
   // the same size as the window grows or shrinks.
   const scaledCueStyle = useMemo(
@@ -2762,7 +2767,7 @@ export function VideoPlayer({
     timelineOffsetSeconds,
     subtitleDelayMs,
     setASSSubtitleState,
-    videoFit,
+    effectiveVideoFit,
     coverCrop,
     activeSubtitleCueRevision,
   );
@@ -4019,7 +4024,7 @@ export function VideoPlayer({
       <video
         ref={videoRef}
         className={`${isDetached ? "h-full w-full" : "absolute inset-0 h-full w-full"} ${
-          videoFit === "cover" ? "object-cover" : "object-contain"
+          effectiveVideoFit === "cover" ? "object-cover" : "object-contain"
         }`}
         onClick={displayMode === "postroll" ? undefined : handleSurfaceTap}
         playsInline
@@ -4194,7 +4199,8 @@ export function VideoPlayer({
           onSeek={handlePlayerSeek}
           onVolumeChange={handleVolumeChange}
           onMutedChange={handleMutedChange}
-          videoFit={videoFit}
+          videoFit={effectiveVideoFit}
+          videoFitLocked={subtitlesBurnedIn}
           onVideoFitToggle={() =>
             setVideoFit((current) => (current === "cover" ? "contain" : "cover"))
           }

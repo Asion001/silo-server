@@ -168,6 +168,16 @@ describe("PlayerControls", () => {
     );
   });
 
+  it("disables Fill while subtitles are burned in", () => {
+    const onVideoFitToggle = vi.fn();
+    renderControls(false, { videoFitLocked: true, onVideoFitToggle });
+
+    const fill = screen.getByRole("button", { name: "Fill screen" });
+    expect(fill).toBeDisabled();
+    fireEvent.click(fill);
+    expect(onVideoFitToggle).not.toHaveBeenCalled();
+  });
+
   it("toggles video fit from the compact overflow menu", () => {
     vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1024);
     vi.stubGlobal(

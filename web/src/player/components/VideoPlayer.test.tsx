@@ -34,6 +34,7 @@ const controls = vi.hoisted(() => ({
     isFullscreen?: boolean;
     onFullscreenToggle?: () => void;
     videoFit?: VideoFitMode;
+    videoFitLocked?: boolean;
     onVideoFitToggle?: () => void;
     onSubtitleJobAccepted?: (jobId: string) => void;
     onMutedChange?: (muted: boolean) => void;
@@ -3768,6 +3769,31 @@ describe("VideoPlayer translation handoff", () => {
 
     expect(video).toHaveClass("object-contain");
     expect(controls.current?.videoFit).toBe("contain");
+  });
+
+  it("keeps the whole frame visible while subtitles are burned in", () => {
+    const { container, rerenderPlayer } = renderPlayer();
+    const video = container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+
+    act(() => controls.current?.onVideoFitToggle?.());
+    expect(video).toHaveClass("object-cover");
+    expect(controls.current?.videoFitLocked).toBe(false);
+
+    const burnIn = fixturePlanV3({
+      ...directPlan,
+      subtitle: { ...directPlan.subtitle, mode: "burn_in" },
+    });
+    rerenderPlayer({ plan: burnIn });
+
+    expect(video).toHaveClass("object-contain");
+    expect(controls.current?.videoFit).toBe("contain");
+    expect(controls.current?.videoFitLocked).toBe(true);
+
+    // The viewer's Fill choice comes back once the burn-in ends.
+    rerenderPlayer({ plan: directPlan });
+    expect(video).toHaveClass("object-cover");
+    expect(controls.current?.videoFitLocked).toBe(false);
   });
 });
 

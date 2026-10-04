@@ -1334,6 +1334,11 @@ html[data-navigation-direction]::view-transition-new(main-content) {
     color: #fff;
     background: rgb(255 255 255 / 0.08);
   }
+  .player-utility-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
+    background: transparent;
+  }
   .player-utility-btn:focus-visible {
     outline: 2px solid rgb(255 255 255 / 0.7);
     outline-offset: 2px;
