@@ -98,8 +98,10 @@ afterEach(() => {
 it("installs the nested v2 session and continues household setup", async () => {
   mount();
   await fill();
+  expect(screen.getByLabelText("Email")).toBeDisabled();
   send();
   await screen.findByText("Household setup");
+  expect(JSON.parse(String(posts()[0]![1]!.body))).toEqual({ password: "password123" });
   expect(auth.completeLogin).toHaveBeenCalledWith(
     expect.objectContaining({
       access_token: accepted.tokens.access_token,
@@ -133,6 +135,25 @@ it("does not refresh or replay a 401 accept and requires explicit reload before 
   await screen.findByLabelText("Email");
   expect(screen.getByRole("button", { name: "Create account" })).not.toBeDisabled();
   expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/auth/refresh"))).toBe(false);
+});
+it("explains a refusal because password sign-in is off instead of offering recovery", async () => {
+  submit = async () =>
+    new Response(
+      JSON.stringify({
+        type: "https://siloserver.org/docs/api/v2/problems/local_login_disabled",
+        title: "Local password sign-in is turned off",
+        status: 403,
+      }),
+      { status: 403, headers: { "Content-Type": "application/problem+json" } },
+    );
+  mount();
+  await fill();
+  send();
+  await screen.findByText(/Password sign-in is turned off on this server/);
+  expect(screen.getByText(/Ask Admin to add you/)).toBeTruthy();
+  expect(screen.queryByText(/We could not confirm the result/)).toBeNull();
+  expect(screen.getByRole("button", { name: "Create account" })).toBeDisabled();
+  expect(auth.completeLogin).not.toHaveBeenCalled();
 });
 it("does not confuse a storage failure with an unavailable invitation", async () => {
   lookup = async () => problem(500);
@@ -234,14 +255,7 @@ it("keeps a link invitation usable when the address already has an account", asy
   expect(posts()).toHaveLength(2);
   expect(auth.completeLogin).not.toHaveBeenCalled();
 });
-it("does not send an address for an emailed invitation", async () => {
-  mount();
-  await fill();
-  expect(screen.getByLabelText("Email")).toBeDisabled();
-  send();
-  await screen.findByText("Household setup");
-  expect(JSON.parse(String(posts()[0]![1]!.body))).toEqual({ password: "password123" });
-});
+
 it("keeps a link invitation in the browser on Android", async () => {
   const agent = vi
     .spyOn(navigator, "userAgent", "get")

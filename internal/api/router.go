@@ -114,6 +114,10 @@ type ArtworkDelivery struct {
 
 type Dependencies struct {
 	Config *config.Config
+	// SubtitlePlaySync receives subtitles a player is served, so one never
+	// synced is aligned the first time it is played. The routes here connect
+	// it to the subtitle sync service; the Jellyfin routes share it. May be nil.
+	SubtitlePlaySync *subtitles.PlaySyncHook
 	// LiveConfig returns the current hot-reloaded config. May be nil (tests,
 	// worker modes); read through CurrentConfig(), which falls back to Config.
 	LiveConfig func() *config.Config
@@ -229,6 +233,14 @@ type Dependencies struct {
 	PluginHTTPProxy         *plugins.HTTPProxy
 	PluginUserConfig        *plugins.UserConfigStore
 	AuthProviders           []auth.RegisteredProvider
+	// AuthProviderSource supplies the auth-plugin sign-in providers, rebuilt
+	// without a restart; OnAuthProvidersChanged rebuilds them on every node
+	// after an auth binding write.
+	AuthProviderSource     auth.PluginProviderSource
+	OnAuthProvidersChanged func(context.Context)
+	// AuthProviderRecheck re-checks sessions opened through an external
+	// sign-in provider at refresh (nil skips it).
+	AuthProviderRecheck *auth.ProviderRecheck
 	// PublicURL is the externally-reachable origin (scheme + host) for this
 	// silo instance. Used to build redirect_uri values handed to OAuth
 	// IdPs. Empty disables the /oauth/{install_id}/{init,callback} routes.
@@ -546,6 +558,12 @@ func newChiRouter(deps Dependencies) chi.Router {
 		)
 		for _, registration := range deps.AuthProviders {
 			authService.RegisterProvider(registration.Info, registration.Provider)
+		}
+		if deps.AuthProviderSource != nil {
+			authService.SetPluginProviderSource(deps.AuthProviderSource)
+		}
+		if deps.AuthProviderRecheck != nil {
+			authService.SetProviderRecheck(deps.AuthProviderRecheck)
 		}
 		if settingsRepo != nil {
 			invitationService = invitations.NewService(
@@ -1395,13 +1413,15 @@ func newChiRouter(deps Dependencies) chi.Router {
 		}
 		subtitleAINotifier = playback.NewSubtitleReadyNotifier(deps.SessionMgr, realtimeHub, subtitleInventoryResolver)
 		if subtitleAINotifier != nil && deps.EventBus != nil {
-			publish := func(ctx context.Context, payload string) error {
-				return deps.EventBus.Publish(ctx, cache.ChannelPlayback, cache.Event{Type: cache.EventSubtitleTimingChanged, Payload: payload})
+			// The bus carries each message under the realtime event it becomes.
+			publish := func(ctx context.Context, event playback.RealtimeEventName, payload string) error {
+				return deps.EventBus.Publish(ctx, cache.ChannelPlayback, cache.Event{Type: string(event), Payload: payload})
 			}
-			subscribe := func(ctx context.Context, handler func(string)) error {
+			subscribe := func(ctx context.Context, handler func(playback.RealtimeEventName, string)) error {
 				return deps.EventBus.Subscribe(ctx, cache.ChannelPlayback, func(event cache.Event) {
-					if event.Type == cache.EventSubtitleTimingChanged {
-						handler(event.Payload)
+					switch event.Type {
+					case cache.EventSubtitleTimingChanged, cache.EventSubtitleSyncUpdated:
+						handler(playback.RealtimeEventName(event.Type), event.Payload)
 					}
 				})
 			}
@@ -1410,7 +1430,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 				busCtx = context.Background()
 			}
 			if err := subtitleAINotifier.UseEventBus(busCtx, publish, subscribe); err != nil {
-				slog.Warn("subscribe subtitle timing changes failed", "component", "api", "error", err)
+				slog.Warn("subscribe subtitle timing changes and sync updates failed", "component", "api", "error", err)
 			}
 		}
 		adminPlaybackControlHandler = handlers.NewAdminPlaybackControlHandler(playbackHandler)
@@ -1452,6 +1472,12 @@ func newChiRouter(deps Dependencies) chi.Router {
 	if streamHandler != nil && subtitleRepo != nil && subtitleBlobs != nil {
 		streamHandler.SubtitleRepo = subtitleRepo
 		streamHandler.SubtitleBlobs = subtitleBlobs
+	}
+	if streamHandler != nil && subtitleRepo != nil {
+		streamHandler.ExternalTimings = subtitleRepo
+	}
+	if streamHandler != nil && deps.SubtitlePlaySync != nil {
+		streamHandler.PlaySync = deps.SubtitlePlaySync
 	}
 	if streamHandler != nil && deps.Config != nil {
 		streamHandler.PlaybackConfig = func() config.PlaybackConfig {
@@ -1684,7 +1710,11 @@ func newChiRouter(deps Dependencies) chi.Router {
 		mediaResolver := &pgSubtitleMediaResolver{pool: deps.DB}
 		subtitleSearchHandler = handlers.NewSubtitleSearchHandler(subtitleManager, subtitleRepo, mediaResolver)
 		if deps.FileRepo != nil && settingsRepo != nil {
-			subtitleSearchHandler.SetSyncService(newSubtitleSyncService(&deps, subtitleManager, subtitleRepo, settingsRepo, subtitleAINotifier))
+			syncService := newSubtitleSyncService(&deps, subtitleManager, subtitleRepo, settingsRepo, subtitleAINotifier)
+			subtitleSearchHandler.SetSyncService(syncService, subtitleRepo)
+			if deps.SubtitlePlaySync != nil {
+				deps.SubtitlePlaySync.Set(syncService)
+			}
 		}
 	}
 
@@ -1736,6 +1766,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 			slog.Default(),
 			aiSem,
 		)
+		aiService.SetExternalTimings(subtitleRepo)
 		aiService.Recover()
 		if deps.OnConfigChange != nil {
 			deps.OnConfigChange(func(_, updated *config.Config) {
@@ -2078,6 +2109,12 @@ func newChiRouter(deps Dependencies) chi.Router {
 				subtitleSource = subtitleManager
 			}
 			downloadSvc.SetOfflineDeps(detailSvc, subtitleSource, nil)
+			if subtitleRepo != nil {
+				downloadSvc.SetExternalTimings(subtitleRepo)
+			}
+			if deps.Blobs.Assets != nil {
+				downloadSvc.SetArtworkStore(deps.Blobs.Assets, deps.ArtworkSigner, deps.ArtworkRepair)
+			}
 		}
 		if streamHandler != nil {
 			downloadSvc.SetSubtitleCache(streamHandler.SubtitleCache)
@@ -2182,10 +2219,12 @@ func newChiRouter(deps Dependencies) chi.Router {
 			restartStatus,
 		)
 	}
-	// The OAuth handler is optional: it only stands up when PublicURL is
-	// configured (a stable redirect_uri origin for IdPs) and the DB is
-	// available (oauth_sessions storage). It is built before the v2 listener
-	// so completeOAuthLogin shares it with the v1 routes.
+	// The OAuth handler is built whenever the database (oauth_sessions
+	// storage), the auth service and the JWT service are available. Until
+	// server.public_url is set (the stable redirect_uri origin for IdPs), a
+	// v2 start sends the browser or app back with provider_unavailable and
+	// the frozen v1 init answers 409; SetHostBaseURL follows config changes. It is built before the v2 listener so
+	// completeOAuthLogin shares it with the v1 routes.
 	var oauthHandler *auth.OAuthHandler
 	if authHandler != nil {
 		if deps.DB != nil && authService != nil && jwtService != nil {
@@ -2194,7 +2233,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 			resolveClient := func(ctx context.Context, installationID int) (auth.OAuthClient, string, error) {
 				pp := authService.FindOAuthInstallation(installationID)
 				if pp == nil {
-					return nil, "", errors.New("plugin not found")
+					return nil, "", auth.ErrUnknownAuthInstallation
 				}
 				c, err := pp.OAuthClient(ctx)
 				if err != nil {
@@ -2202,14 +2241,21 @@ func newChiRouter(deps Dependencies) chi.Router {
 				}
 				return c, pp.CapabilityID(), nil
 			}
+			identity := serveridentity.New(catalog.NewServerSettingsRepo(deps.DB))
 			oauthHandler = auth.NewOAuthHandler(auth.OAuthHandlerDeps{
 				Store:           oauthStore,
 				CompletionStore: oauthStore,
+				LinkTickets:     oauthStore,
 				StateSecret:     stateSecret,
 				ResolveClient:   resolveClient,
 				LoginCompleter:  authService,
 				HostBaseURL:     deps.PublicURL,
 				StateTTL:        10 * time.Minute,
+				ServerID:        identity.ServerID,
+				RevokeSession:   authService.Logout,
+				Users:           userRepo,
+				ProviderLogout:  authService.ProviderLogoutURL,
+				KnownOrigins:    deps.overlayOrigins(),
 			})
 			if deps.OnConfigChange != nil {
 				deps.OnConfigChange(func(_, updated *config.Config) {
@@ -2453,6 +2499,10 @@ func newChiRouter(deps Dependencies) chi.Router {
 			v2deps.AdminWatchSummary = adminHandler
 		}
 		v2deps.AdminPlaybackSessions = adminHandler
+		if deps.DB != nil && deps.ArtifactManager != nil {
+			v2deps.AdminDownloadPreparations = downloads.NewPreparationReader(deps.DB, profileNamesByUser(deps.UserStoreProvider))
+			v2deps.AdminDownloadPreparationControls = deps.ArtifactManager
+		}
 		if adminPlaybackControlHandler != nil {
 			v2deps.AdminPlaybackCommands = adminPlaybackControlHandler
 			v2deps.AdminPlaybackTerminate = adminPlaybackControlHandler
@@ -2675,6 +2725,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.AdminPluginRepositoryUpdates = plugins.NewRepositoryStore(deps.DB)
 		v2deps.AdminPluginRepositoryDeletes = plugins.NewRepositoryStore(deps.DB)
 	}
+	var externalSignInPlugins *handlers.PluginHandler
 	if deps.DB != nil && deps.PluginService != nil && deps.PluginUserConfig != nil {
 		v2PluginHandler := handlers.NewPluginHandler(
 			plugins.NewRepositoryStore(deps.DB),
@@ -2687,10 +2738,15 @@ func newChiRouter(deps Dependencies) chi.Router {
 			deps.PluginImageResolver,
 			restartStatus,
 		)
+		v2PluginHandler.SetAuthProvidersChanged(deps.OnAuthProvidersChanged)
 		v2deps.AdminPluginInventory = v2PluginHandler
 		v2deps.AdminPluginConfiguration = v2PluginHandler
 		v2deps.AdminPluginLifecycle = v2PluginHandler
 		v2deps.AdminPluginUploads = v2PluginHandler
+		externalSignInPlugins = v2PluginHandler
+	}
+	if deps.DB != nil && authService != nil && userRepo != nil {
+		v2deps.ExternalSignIn = handlers.NewExternalSignInHandler(auth.NewIdentityService(deps.DB), authService, userRepo, externalSignInPlugins)
 	}
 	if deps.PluginService != nil {
 		v2deps.NetworkAccess = deps.PluginService
@@ -2964,6 +3020,13 @@ func newChiRouter(deps Dependencies) chi.Router {
 					r.Post("/device/poll", authHandler.HandleDevicePoll)
 				}
 
+				// Device sign-in decisions take a user code, so they spend
+				// the lookup's guessing budget as well as authenticating.
+				var deviceDecisionMiddlewares []func(http.Handler) http.Handler
+				if deps.RateLimitMW != nil {
+					deviceDecisionMiddlewares = append(deviceDecisionMiddlewares, deps.RateLimitMW.AuthEndpointHandler("device_lookup"))
+				}
+
 				// Protected auth routes (require valid session).
 				if authMiddleware != nil {
 					r.Group(func(r chi.Router) {
@@ -2986,14 +3049,14 @@ func newChiRouter(deps Dependencies) chi.Router {
 						}
 						r.With(passwordChangeMiddlewares...).
 							Post("/account/password", authHandler.HandleChangePassword)
-						r.Post("/device/approve", authHandler.HandleDeviceApprove)
-						r.Post("/device/deny", authHandler.HandleDeviceDeny)
+						r.With(deviceDecisionMiddlewares...).Post("/device/approve", authHandler.HandleDeviceApprove)
+						r.With(deviceDecisionMiddlewares...).Post("/device/deny", authHandler.HandleDeviceDeny)
 					})
 					if viewerAccessMiddleware != nil {
 						r.With(
 							authMiddleware.RequireAuth,
 							viewerAccessMiddleware.RequireViewerAccess,
-						).Post("/device/approve-handoff", authHandler.HandleDeviceApproveHandoff)
+						).With(deviceDecisionMiddlewares...).Post("/device/approve-handoff", authHandler.HandleDeviceApproveHandoff)
 					}
 				}
 			})
@@ -4124,6 +4187,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 									deps.PluginImageResolver,
 									restartStatus,
 								)
+								pluginHandler.SetAuthProvidersChanged(deps.OnAuthProvidersChanged)
 								r.Route("/plugins", func(r chi.Router) {
 									r.Get("/catalog-settings", pluginHandler.HandleGetCatalogSettings)
 									r.Put("/catalog-settings", pluginHandler.HandlePutCatalogSettings)
@@ -5055,4 +5119,29 @@ func v2Dependencies(
 		out.CursorSecret = []byte(deps.Config.Auth.JWTSecret)
 	}
 	return out
+}
+
+// profileNamesByUser resolves an account's profile names through its user
+// store; nil when there is no store provider.
+func profileNamesByUser(stores userstore.UserStoreProvider) downloads.ProfileNamesFunc {
+	if stores == nil {
+		return nil
+	}
+	return func(ctx context.Context, userID int) (map[string]string, error) {
+		store, err := stores.ForUser(ctx, userID)
+		if err != nil || store == nil {
+			return nil, err
+		}
+		profiles, err := store.ListProfiles(ctx)
+		if err != nil {
+			return nil, err
+		}
+		names := make(map[string]string, len(profiles))
+		for _, profile := range profiles {
+			if name := strings.TrimSpace(profile.Name); name != "" {
+				names[profile.ID] = name
+			}
+		}
+		return names, nil
+	}
 }

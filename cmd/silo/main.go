@@ -110,6 +110,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/secret"
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/server"
+	"github.com/Silo-Server/silo-server/internal/serveridentity"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
 	"github.com/Silo-Server/silo-server/internal/storagetransition"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
@@ -683,6 +684,13 @@ func main() {
 		return
 	}
 
+	if len(os.Args) > 1 && os.Args[1] == "auth" {
+		if err := runAuthCommand(context.Background(), os.Args[2:], os.Stdout); err != nil {
+			log.Fatalf("auth: %v", err)
+		}
+		return
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "owner" {
 		if err := runOwnerCommand(context.Background(), os.Args[2:], os.Stdout); err != nil {
 			log.Fatalf("owner: %v", err)
@@ -1245,7 +1253,11 @@ func main() {
 	redisBootstrapAvailable := (normalizedBootstrapRedisURL != "" && bootstrapRedisURLErr == nil) ||
 		(strings.TrimSpace(cfg.Redis.SentinelMaster) != "" && len(cfg.Redis.SentinelAddresses) > 0)
 
+	// The API routes connect the subtitle sync service to this hook; the
+	// Jellyfin routes share it, so a first play from either side syncs.
+	subtitlePlaySync := &subtitles.PlaySyncHook{}
 	deps := api.Dependencies{
+		SubtitlePlaySync:             subtitlePlaySync,
 		Config:                       cfg,
 		LiveConfig:                   configWatcher.Config,
 		OnConfigChange:               configWatcher.OnChange,
@@ -2767,6 +2779,63 @@ func main() {
 		}
 	}
 
+	// Sign-in providers come from enabled auth_provider.v1 bindings. The
+	// registry rebuilds on this node after a plugin lifecycle change (install,
+	// config save, removal) or an auth binding write, and on every other node
+	// when that change is announced on the admin channel, so no restart is
+	// needed (docs/architecture/external-sign-in.md).
+	var authProviderRegistry *auth.PluginProviderRegistry
+	if deps.DB != nil && pluginInstallationStore != nil && pluginRuntimeConfigStore != nil && deps.PluginService != nil {
+		// The resolver stores the plugins' refresh_state encrypted with the
+		// server secret, for the provider re-check at session refresh.
+		accountResolver := auth.NewAccountResolver(deps.DB,
+			auth.NewAccountProvisioner(auth.NewUserRepository(deps.DB), userStoreProvider),
+			func(ctx context.Context, userID int) {
+				if deps.OnUserSessionsRevoked != nil {
+					deps.OnUserSessionsRevoked(ctx, userID)
+				}
+			}).WithSecretCipher(dataCipher)
+		authProviderRegistry = auth.NewPluginProviderRegistry(auth.PluginProviderRegistryConfig{
+			Bindings:      pluginRuntimeConfigStore,
+			Installations: pluginInstallationStore,
+			GlobalConfigs: pluginRuntimeConfigStore,
+			Manifests:     deps.PluginService,
+			Clients:       deps.PluginService,
+			Sessions:      auth.NewSessionRepository(deps.DB),
+			Resolver:      accountResolver,
+		})
+		deps.AuthProviderRecheck = auth.NewProviderRecheck(accountResolver, authProviderRegistry)
+		if err := authProviderRegistry.Rebuild(appCtx); err != nil {
+			log.Fatalf("build sign-in providers: %v", err)
+		}
+		// A change made on this node applies before its request returns; a
+		// failure there, another node's announcement and the periodic resync
+		// go through RunRebuilds, which coalesces them and retries failures.
+		rebuildAuthProviders := func(ctx context.Context) {
+			if err := authProviderRegistry.Rebuild(ctx); err != nil {
+				slog.WarnContext(ctx, "rebuild sign-in providers failed; keeping the previous set and retrying", "component", "auth", "error", err)
+				authProviderRegistry.RequestRebuild()
+			}
+		}
+		go authProviderRegistry.RunRebuilds(appCtx, auth.ProviderRegistryResyncInterval, auth.ProviderRegistryRetryWait)
+		deps.PluginService.AddLifecycleHook(rebuildAuthProviders)
+		if err := eventBus.Subscribe(appCtx, cache.ChannelAdmin, func(event cache.Event) {
+			if event.Type == cache.EventAuthProvidersChanged || event.Type == cache.EventPluginsChanged {
+				authProviderRegistry.RequestRebuild()
+			}
+		}); err != nil {
+			slog.Warn("subscribe sign-in provider changes failed; other nodes' binding changes apply at the next periodic resync", "error", err,
+				"resync_interval", auth.ProviderRegistryResyncInterval)
+		}
+		deps.AuthProviderSource = authProviderRegistry
+		deps.OnAuthProvidersChanged = func(ctx context.Context) {
+			rebuildAuthProviders(ctx)
+			if err := eventBus.Publish(ctx, cache.ChannelAdmin, cache.Event{Type: cache.EventAuthProvidersChanged}); err != nil {
+				slog.WarnContext(ctx, "publish sign-in provider change failed", "component", "auth", "error", err)
+			}
+		}
+	}
+
 	// Wire up task manager for admin task API.
 	if needsWorkers && deps.DB != nil {
 		triggerRepo := taskrepository.NewPgTriggerRepository(deps.DB)
@@ -2831,6 +2900,8 @@ func main() {
 		maintenanceSteps = append(maintenanceSteps,
 			tasks.NewTaskHistoryCleanupTask(historyRepo, settingsRepo),
 			tasks.NewAuthSessionCleanupTask(auth.NewSessionRepository(deps.DB)),
+			tasks.NewDeviceLoginCleanupTask(auth.NewDeviceLoginRetention(deps.DB)),
+			tasks.NewOAuthFlowCleanupTask(auth.NewPGOAuthStore(deps.DB)),
 		)
 		var diagnosticsStore diagnostics.ObjectStore
 		if deps.S3Private != nil {
@@ -2888,6 +2959,22 @@ func main() {
 				},
 			)
 			artifactMgr.SetSettingsReader(settingsRepo)
+			artifactMgr.SetFFmpegLogSink(playback.NewSlogFFmpegLogSink(slog.Default(), deps.NodeID))
+			artifactMgr.SetPreparationNotifier(func(ctx context.Context, event downloads.PreparationEvent) {
+				if deps.EventsHub == nil {
+					return
+				}
+				payload := map[string]any{"id": event.ArtifactID}
+				if event.Progress != nil {
+					payload["progress"] = map[string]any{
+						"encoded_seconds":  event.Progress.EncodedSeconds,
+						"duration_seconds": event.Progress.DurationSeconds,
+						"speed":            event.Progress.Speed,
+						"updated_at":       event.Progress.UpdatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+					}
+				}
+				_ = deps.EventsHub.PublishJSON(ctx, evt.ChannelDownloadPreparations, event.Name, payload, evt.PublishOptions{AdminOnly: true})
+			})
 			encodeTask := tasks.NewEncodeDownloadArtifactsTask(artifactMgr)
 			artifactMgr.SetKick(func() { _ = taskMgr.RunTask(appCtx, encodeTask.Key()) })
 			taskMgr.Register(encodeTask)
@@ -3066,6 +3153,11 @@ func main() {
 			taskMgr.Register(tasks.NewSyncMangaMetadataTask(mangaEnricher))
 		}
 		taskMgr.Register(tasks.NewDatabaseMaintenanceTask(deps.DB, maintenanceSteps...))
+		if deps.AuthProviderRecheck != nil {
+			// Accounts that hold API keys or idle sessions never refresh, so
+			// their provider re-check runs on a schedule.
+			taskMgr.Register(tasks.NewRecheckExternalIdentitiesTask(deps.DB, deps.AuthProviderRecheck))
+		}
 		if pluginInstallationStore != nil && pluginRuntimeConfigStore != nil && pluginService != nil {
 			pluginTasks, err := plugins.NewTaskRegistryWithTypedResolver(pluginInstallationStore, pluginRuntimeConfigStore, pluginService).Tasks(appCtx)
 			if err != nil {
@@ -3106,6 +3198,9 @@ func main() {
 			nil, // settings: not needed here
 			nil, // user store: not needed here
 		)
+		// Audiobookshelf compatibility (beta) signs in local accounts only:
+		// its sessions refresh without the provider re-check, so directory
+		// users are not routed to their provider here.
 		absItemRepo := catalog.NewItemRepository(deps.DB)
 		absEpisodeRepo := catalog.NewEpisodeRepository(deps.DB)
 		absSeasonRepo := catalog.NewSeasonRepository(deps.DB)
@@ -3145,108 +3240,6 @@ func main() {
 		deps.ABSHandler = absH
 	}
 	_ = audiobooksService
-
-	if deps.DB != nil && pluginInstallationStore != nil && pluginRuntimeConfigStore != nil && deps.PluginService != nil {
-		userRepo := auth.NewUserRepository(deps.DB)
-		sessionRepo := auth.NewSessionRepository(deps.DB)
-		authBindings, err := pluginRuntimeConfigStore.ListAuthBindings(appCtx)
-		if err != nil {
-			log.Fatalf("list plugin auth bindings: %v", err)
-		}
-		for _, binding := range authBindings {
-			if binding == nil || !binding.Enabled {
-				continue
-			}
-			installation, err := pluginInstallationStore.GetByID(appCtx, binding.InstallationID)
-			if err != nil {
-				log.Fatalf("load plugin auth installation %d: %v", binding.InstallationID, err)
-			}
-			if !installation.Enabled {
-				continue
-			}
-			displayName := binding.CapabilityID
-			mode := "credentials"
-			iconURL := ""
-			capabilities, err := pluginInstallationStore.ListCapabilities(appCtx, binding.InstallationID)
-			if err == nil {
-				for _, capability := range capabilities {
-					if capability != nil && capability.Type == "auth_provider.v1" && capability.ID == binding.CapabilityID {
-						if name, ok := capability.Metadata["display_name"].(string); ok && strings.TrimSpace(name) != "" {
-							displayName = name
-						}
-						// auth_modes ["oauth2"] flips the login button into
-						// an OAuth-style "Sign in with X" path. Mode is "oauth"
-						// when oauth2 is the only declared mode; "credentials"
-						// when password is supported alongside or alone.
-						if rawModes, ok := capability.Metadata["auth_modes"].([]any); ok {
-							hasPassword := false
-							hasOAuth := false
-							for _, m := range rawModes {
-								switch m {
-								case "password":
-									hasPassword = true
-								case "oauth2":
-									hasOAuth = true
-								}
-							}
-							if hasOAuth && !hasPassword {
-								mode = "oauth"
-							}
-						}
-						if url, ok := capability.Metadata["icon_url"].(string); ok {
-							iconURL = url
-						}
-						break
-					}
-				}
-			}
-
-			// Generic OIDC and similar multi-instance plugins ship one binary
-			// but install once per IdP. Their admin SPA writes display_name
-			// + icon_url_path to runtime config so each install renders its
-			// own brand on the login page. Manifest values are the fallback.
-			if runtimeConfigs, err := pluginRuntimeConfigStore.ListGlobalConfigs(appCtx, binding.InstallationID); err == nil {
-				for _, rc := range runtimeConfigs {
-					switch rc.Key {
-					case "display_name":
-						if v, ok := rc.Value["value"].(string); ok && strings.TrimSpace(v) != "" {
-							displayName = v
-						}
-					case "icon_url_path":
-						if v, ok := rc.Value["value"].(string); ok && strings.TrimSpace(v) != "" {
-							// Minted under the versioned plugin-content mount so the
-							// icon keeps resolving after the /api/v1 tombstone; the v2
-							// auth-providers projection validates this shape.
-							iconURL = fmt.Sprintf("%s/plugins/%d/assets/%s", plugins.ContentPrefix, binding.InstallationID, strings.TrimLeft(v, "/"))
-						}
-					}
-				}
-			}
-
-			deps.AuthProviders = append(deps.AuthProviders, auth.RegisteredProvider{
-				Info: auth.LoginProviderInfo{
-					ID:             fmt.Sprintf("plugin:%d:%s", binding.InstallationID, binding.CapabilityID),
-					DisplayName:    displayName,
-					Mode:           mode,
-					Default:        binding.DefaultLogin,
-					IconURL:        iconURL,
-					InstallationID: binding.InstallationID,
-				},
-				Provider: auth.NewPluginProvider(
-					auth.PluginProviderConfig{
-						InstallationID: binding.InstallationID,
-						CapabilityID:   binding.CapabilityID,
-						DisplayName:    displayName,
-						AutoProvision:  binding.AutoProvision,
-					},
-					sessionRepo,
-					userRepo,
-					deps.DB,
-					deps.PluginService,
-				),
-			})
-		}
-	}
 
 	// Step 7: Build HTTP router with all dependencies.
 	// compatServer is populated after the compat server is constructed below;
@@ -3445,8 +3438,9 @@ func main() {
 			FrontendFS:           deps.FrontendFS,
 			// Hand remote-transcode recipes to the shared recipe store so a dedicated
 			// transcode node that restarts can rebuild a jellycompat session.
-			RecipeNodeStore: noderecipe.NewStore(apiRedisClient, 0),
-			SessionSyncer:   deps.SessionSyncer,
+			RecipeNodeStore:  noderecipe.NewStore(apiRedisClient, 0),
+			SessionSyncer:    deps.SessionSyncer,
+			SubtitlePlaySync: subtitlePlaySync,
 		}
 
 		// Wire direct dependencies when DB is available.
@@ -3541,6 +3535,12 @@ func main() {
 			})
 			provider := auth.NewLocalProvider(userRepo, sessionRepo)
 			compatDeps.AuthService = auth.NewService(provider, jwtService, sessionRepo, userRepo, nil, nil, nil)
+			if authProviderRegistry != nil {
+				// Directory (LDAP) users sign in with their directory password.
+				compatDeps.AuthService.SetPluginProviderSource(authProviderRegistry)
+				// Compatibility sessions refresh their Silo session too.
+				compatDeps.AuthService.SetProviderRecheck(deps.AuthProviderRecheck)
+			}
 
 			// Access filter resolver for viewer-scoped library access.
 			// Backed by the shared access.Resolver so account-level library
@@ -3614,6 +3614,9 @@ func main() {
 	}
 
 	errCh := make(chan error, 3)
+	// Closed when the LAN advertiser has sent its goodbye packets; nil when
+	// discovery is off.
+	var lanDiscoveryDone chan struct{}
 	// Bind before serving so resident plugins, which reverse-proxy to this
 	// listener, are only started once it exists.
 	apiListener, apiListenErr := net.Listen("tcp", cfg.Server.Listen)
@@ -3631,6 +3634,13 @@ func main() {
 				slog.Error("post-restart storage transition reconciliation paused; it will resume on the next start", "error", reconcileErr)
 			}
 		}()
+		if cfg.Server.LANDiscovery && (mode == "integrated" || mode == "api") {
+			lanDiscoveryDone = make(chan struct{})
+			go func() {
+				defer close(lanDiscoveryDone)
+				advertiseOnLAN(appCtx, apiListener.Addr(), serveridentity.New(catalog.NewServerSettingsRepo(pool)), brandingSvc)
+			}()
+		}
 		if pluginService != nil {
 			pluginService.StartResidents(appCtx)
 			if mode == "api" {
@@ -3675,6 +3685,16 @@ func main() {
 	slog.Info("beginning graceful shutdown")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
+
+	// Let the LAN advertiser withdraw the service (appCtx is already
+	// canceled) so clients drop it now rather than when its records expire.
+	if lanDiscoveryDone != nil {
+		select {
+		case <-lanDiscoveryDone:
+		case <-time.After(2 * time.Second):
+			slog.WarnContext(shutdownCtx, "LAN discovery did not withdraw its advertisement before shutdown")
+		}
+	}
 
 	// 0. Stop resident plugins first: their overlay listeners front the HTTP
 	// servers, so ingress goes away before the servers drain.
