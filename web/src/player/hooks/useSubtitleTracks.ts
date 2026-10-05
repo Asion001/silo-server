@@ -201,8 +201,8 @@ export function useSubtitleTracks(
     }
 
     // Skip entirely for ASS/SSA (JASSUB renders those via useASSSubtitles)
-    // and bitmap codecs (PGS/DVD/DVB are burned into the video server-side;
-    // rendering text cues for them would double up on screen).
+    // and bitmap codecs (usePGSSubtitles draws PGS; DVD/DVB are burned into
+    // the video server-side), which carry no text cues.
     if (isASSCodec(activeCodec) || isBitmapCodec(activeCodec)) {
       return;
     }

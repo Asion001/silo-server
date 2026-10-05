@@ -20,6 +20,7 @@ import { useIntroSkipPrompt } from "../hooks/useIntroSkipPrompt";
 import { useRemuxSeeking } from "../hooks/useRemuxSeeking";
 import { useSubtitleTracks } from "../hooks/useSubtitleTracks";
 import { useASSSubtitles } from "../hooks/useASSSubtitles";
+import { usePGSSubtitles } from "../hooks/usePGSSubtitles";
 import { useSubtitleSync } from "../hooks/useSubtitleSync";
 import { useSubtitleSyncFeedback } from "../hooks/useSubtitleSyncFeedback";
 import { syncKeyOf } from "../utils/subtitleSync";
@@ -2771,7 +2772,23 @@ export function VideoPlayer({
     coverCrop,
     activeSubtitleCueRevision,
   );
-  const subtitleLoadState = isASSActive ? assSubtitleState : textSubtitleState;
+  // -- PGS (Blu-ray bitmap) rendering via libpgs --
+  const [pgsSubtitleState, setPGSSubtitleState] = useState("idle");
+  const { isActive: isPGSActive } = usePGSSubtitles(
+    videoRef,
+    subtitleUrls,
+    activeSubtitleIndex,
+    isDetached,
+    timelineOffsetSeconds,
+    subtitleDelayMs,
+    setPGSSubtitleState,
+    activeSubtitleCueRevision,
+  );
+  const subtitleLoadState = isASSActive
+    ? assSubtitleState
+    : isPGSActive
+      ? pgsSubtitleState
+      : textSubtitleState;
   const subtitleSyncFeedback = useSubtitleSyncFeedback({
     sync: subtitleSync,
     tracks: subtitleUrls,
@@ -4055,8 +4072,9 @@ export function VideoPlayer({
           </div>
         )}
 
-      {/* Subtitle overlay — suppressed when JASSUB (ASS) is rendering; bitmap
-          tracks are burned into the video server-side and never reach here.
+      {/* Subtitle overlay — suppressed when JASSUB (ASS) is rendering; PGS
+          draws on its own canvas and DVD/DVB tracks are burned into the video
+          server-side, so bitmap tracks never reach here.
           While the control bar is up, bottom-anchored cues rise just above it
           (subtitleLiftPx) so they never overlap the HUD; they settle back when
           it hides. z-[5] keeps cues below the controls layer (z-10) as a
