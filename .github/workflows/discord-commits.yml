@@ -7,6 +7,8 @@ on:
 
 jobs:
   notify:
+    # Forks have no webhook secret; posting from one only fails.
+    if: github.repository == 'Silo-Server/silo-server'
     permissions:
       contents: read
     uses: ./.github/workflows/reusable-discord-commits.yml
