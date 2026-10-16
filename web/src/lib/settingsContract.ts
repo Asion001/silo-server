@@ -9,7 +9,7 @@
  */
 
 export const SETTINGS_API_VERSION = 1;
-export const SETTINGS_REVISION = 16;
+export const SETTINGS_REVISION = 18;
 
 export interface SettingSuggestedOption {
   value: string;
@@ -180,6 +180,10 @@ export const SETTING_OPTION_SETS = {
 export type SettingOptionSetId = keyof typeof SETTING_OPTION_SETS;
 
 export const SETTING_KEYS = {
+  /** Blur unwatched episode images */
+  CATALOG_HIDE_UNWATCHED_EPISODE_IMAGES: "catalog.hide_unwatched_episode_images",
+  /** Hide unwatched episode descriptions */
+  CATALOG_HIDE_UNWATCHED_EPISODE_OVERVIEWS: "catalog.hide_unwatched_episode_overviews",
   /** Metadata language */
   CATALOG_METADATA_LANGUAGE: "catalog.metadata_language",
   /** Metadata language exceptions */
@@ -296,6 +300,8 @@ export const SETTING_KEYS = {
   UI_LIBRARY_PAGE_STATE: "ui.library_page_state",
   /** Next up episodes */
   UI_NEXT_UP_MODE: "ui.next_up_mode",
+  /** Show new episodes first */
+  UI_NEXT_UP_NEW_RELEASES_FIRST: "ui.next_up_new_releases_first",
   /** Remember library view */
   UI_REMEMBER_LIBRARY_PAGE_STATE: "ui.remember_library_page_state",
   /** Pinned sidebar items */
@@ -368,6 +374,39 @@ export interface SettingDefinition {
 }
 
 export const SETTING_DEFINITIONS: Record<SettingKey, SettingDefinition> = {
+  "catalog.hide_unwatched_episode_images": {
+    key: "catalog.hide_unwatched_episode_images",
+    type: "boolean",
+    nullable: false,
+    persistence: "remote",
+    introducedIn: 17,
+    scopes: ["profile"],
+    scopeIntroducedIn: [17],
+    resolutionOrder: ["profile", "default"],
+    defaultValue: false,
+    label: "Blur unwatched episode images",
+    description:
+      "Blur an episode's thumbnail until you start watching it, so the image does not give away the story.",
+    category: "catalog",
+    control: "switch",
+    platforms: ["web", "ios", "tvos", "macos", "android", "android_tv"],
+  },
+  "catalog.hide_unwatched_episode_overviews": {
+    key: "catalog.hide_unwatched_episode_overviews",
+    type: "boolean",
+    nullable: false,
+    persistence: "remote",
+    introducedIn: 17,
+    scopes: ["profile"],
+    scopeIntroducedIn: [17],
+    resolutionOrder: ["profile", "default"],
+    defaultValue: false,
+    label: "Hide unwatched episode descriptions",
+    description: "Hide an episode's description until you start watching it.",
+    category: "catalog",
+    control: "switch",
+    platforms: ["web", "ios", "tvos", "macos", "android", "android_tv"],
+  },
   "catalog.metadata_language": {
     key: "catalog.metadata_language",
     type: "language_tag",
@@ -1417,6 +1456,22 @@ export const SETTING_DEFINITIONS: Record<SettingKey, SettingDefinition> = {
       { value: "combined", label: "With Continue Watching", introducedIn: 1 },
       { value: "separate", label: "Separate row", introducedIn: 1 },
     ],
+  },
+  "ui.next_up_new_releases_first": {
+    key: "ui.next_up_new_releases_first",
+    type: "boolean",
+    nullable: false,
+    persistence: "remote",
+    introducedIn: 18,
+    scopes: ["profile"],
+    scopeIntroducedIn: [18],
+    resolutionOrder: ["profile", "default"],
+    defaultValue: false,
+    label: "Show new episodes first",
+    description:
+      "Move a show you've caught up on to the front of Continue Watching and Next Up when a new episode or season arrives.",
+    category: "navigation",
+    control: "switch",
   },
   "ui.remember_library_page_state": {
     key: "ui.remember_library_page_state",

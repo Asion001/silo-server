@@ -49,6 +49,7 @@ const (
 	EventAdminStatsInvalidated       = "admin_stats_invalidated"
 	EventPlaybackSessionsChanged     = "playback_sessions_changed"
 	EventMarkersUpdated              = "markers_updated"
+	EventMarkerThumbnailReady        = "marker_thumbnail_ready"
 	EventSubtitleTimingChanged       = "subtitle_timing_changed"
 	EventSubtitleSyncUpdated         = "subtitle_sync_updated"
 	EventUserDisabled                = "user_disabled"
@@ -68,6 +69,12 @@ const (
 	EventPluginsChanged = "plugins_changed"
 )
 
+// EventNodeUnreachable is published on ChannelAdmin when an API server could
+// not connect to a transcode node, so the other API servers stop selecting it
+// before their next health sweep. The payload is JSON naming the node URL and
+// the announcing process.
+const EventNodeUnreachable = "node_unreachable"
+
 // EventAuthProvidersChanged is published on ChannelAdmin after an auth
 // binding write, so every API replica rebuilds its sign-in providers without
 // a restart. Plugin install, config and removal changes arrive as
@@ -78,6 +85,12 @@ const EventAuthProvidersChanged = "auth_providers_changed"
 // login sessions were revoked, so every API replica drops that account's
 // in-memory Jellyfin-compatible sessions.
 const EventUserSessionsRevoked = "user_sessions_revoked"
+
+// EventNodeDrainChanged is published on ChannelAdmin by a transcode node when
+// it starts or stops draining, with its stream_nodes id as the payload, so
+// every API server rechecks that node instead of waiting for its next health
+// sweep. Draining means the node takes no new work; see nodepool.DrainState.
+const EventNodeDrainChanged = "node_drain_changed"
 
 // ---------------------------------------------------------------------------
 // Event
@@ -171,7 +184,7 @@ type RedisEventBus struct {
 
 // newRedisEventBus creates a RedisEventBus connected to the Redis cfg names.
 func newRedisEventBus(cfg config.RedisConfig) *RedisEventBus {
-	client, sentinel, err := newRedisClient(cfg)
+	client, sentinel, err := newRedisClient(cfg, false)
 	if err != nil {
 		client = redis.NewClient(unparsedRedisOptions(cfg, err))
 	}
@@ -255,6 +268,37 @@ func redisChannel(channel string, db int) string {
 		return channel
 	}
 	return channel + "@db" + strconv.Itoa(db)
+}
+
+// eventBusChannels are the channels a starting server subscribes to. Redis
+// refuses a subscription that the user's ACL does not grant, and a refused
+// subscription stops the start.
+var eventBusChannels = []string{ChannelCatalog, ChannelAdmin, ChannelPlayback, ChannelLogs, ChannelEvents}
+
+// CheckEventBusChannels subscribes client to every event bus channel on its
+// database number, as a starting server does, and returns the error Redis
+// answers with. It leaves no subscription behind.
+func CheckEventBusChannels(ctx context.Context, client *redis.Client) error {
+	db := client.Options().DB
+	channels := make([]string, 0, len(eventBusChannels))
+	for _, channel := range eventBusChannels {
+		channels = append(channels, redisChannel(channel, db))
+	}
+	pubsub := client.Subscribe(ctx, channels...)
+	defer func() { _ = pubsub.Close() }()
+	// Redis refuses the whole command when its ACL denies one channel, but a
+	// compatible server or a proxy can answer each channel on its own, so
+	// every channel's confirmation is read.
+	for confirmed := 0; confirmed < len(channels); {
+		msg, err := pubsub.Receive(ctx)
+		if err != nil {
+			return err
+		}
+		if _, ok := msg.(*redis.Subscription); ok {
+			confirmed++
+		}
+	}
+	return nil
 }
 
 // Publish serializes the event as JSON and publishes it on the given
@@ -445,10 +489,23 @@ func NewRedisClient(cfg config.RedisConfig) (*redis.Client, error) {
 // NewRedisClientForRole associates all standalone or Sentinel operations and
 // pool pressure with a bounded operational role.
 func NewRedisClientForRole(cfg config.RedisConfig, role string) (*redis.Client, error) {
+	return newRedisClientForRole(cfg, role, false)
+}
+
+// NewDeadlineRedisClientForRole is NewRedisClientForRole for callers that must
+// not wait past their context's deadline, such as a sweep other work waits on.
+// Its socket reads and writes honor that deadline, so a Redis that stops
+// answering frees the connection when the caller gives up instead of holding
+// it for the URL's read timeout, which may be unlimited.
+func NewDeadlineRedisClientForRole(cfg config.RedisConfig, role string) (*redis.Client, error) {
+	return newRedisClientForRole(cfg, role, true)
+}
+
+func newRedisClientForRole(cfg config.RedisConfig, role string, honorContextDeadlines bool) (*redis.Client, error) {
 	if cfg.URL == "" {
 		return nil, nil
 	}
-	client, _, err := newRedisClient(cfg)
+	client, _, err := newRedisClient(cfg, honorContextDeadlines)
 	if err != nil {
 		return nil, err
 	}
@@ -459,13 +516,33 @@ func NewRedisClientForRole(cfg config.RedisConfig, role string) (*redis.Client, 
 // a Sentinel URL. A Sentinel client asks Sentinel for the master each time it
 // opens a connection, and closes its pooled connections when Sentinel
 // announces a new master.
-func newRedisClient(cfg config.RedisConfig) (*redis.Client, bool, error) {
+func newRedisClient(cfg config.RedisConfig, honorContextDeadlines bool) (*redis.Client, bool, error) {
 	options, failover, err := cfg.Options()
 	if err != nil {
 		return nil, false, err
 	}
 	if failover != nil {
+		if honorContextDeadlines {
+			failover.ContextTimeoutEnabled = true
+			keepSocketDeadlines(&failover.ReadTimeout, &failover.WriteTimeout)
+		}
 		return redis.NewFailoverClient(failover), true, nil
 	}
+	if honorContextDeadlines {
+		options.ContextTimeoutEnabled = true
+		keepSocketDeadlines(&options.ReadTimeout, &options.WriteTimeout)
+	}
 	return redis.NewClient(options), false, nil
+}
+
+// keepSocketDeadlines turns a negative timeout into -1, which go-redis reads
+// as no timeout of its own, so the context's deadline still reaches the
+// socket. go-redis sets no socket deadline at all, context or not, for any
+// other negative timeout, such as the -1s a URL's read_timeout=-1s gives.
+func keepSocketDeadlines(timeouts ...*time.Duration) {
+	for _, timeout := range timeouts {
+		if *timeout < 0 {
+			*timeout = -1
+		}
+	}
 }

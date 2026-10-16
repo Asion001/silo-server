@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/pluginhost"
 )
 
@@ -165,7 +166,8 @@ func (s *AutoUpdateService) SetRequiredPlugins(required func(context.Context) ([
 }
 
 // Check runs a plugin update pass. It can be used by startup, scheduled tasks,
-// and manual admin actions.
+// and manual admin actions. Each per-plugin failure is logged and recorded in
+// the summary; only failures that stop the whole pass are returned.
 func (s *AutoUpdateService) Check(ctx context.Context, opts AutoUpdateOptions) (AutoUpdateSummary, error) {
 	var summary AutoUpdateSummary
 
@@ -260,6 +262,10 @@ func (s *AutoUpdateService) Check(ctx context.Context, opts AutoUpdateOptions) (
 		s.notifyChanged(ctx)
 	}
 
+	for _, failure := range summary.Failures {
+		s.logger.WarnContext(ctx, "plugin auto-update operation failed", "error", failure)
+	}
+
 	return summary, nil
 }
 
@@ -278,16 +284,11 @@ func (s *AutoUpdateService) notifyChanged(ctx context.Context) {
 // installed plugins according to their update policy. All errors are logged
 // rather than returned so that startup is never blocked.
 func (s *AutoUpdateService) Run(ctx context.Context) error {
-	summary, err := s.Check(ctx, AutoUpdateOptions{
+	if _, err := s.Check(ctx, AutoUpdateOptions{
 		SeedDefaultRepository: true,
 		AutoInstallDefaults:   true,
-	})
-	if err != nil {
+	}); err != nil {
 		s.logger.WarnContext(ctx, "failed to run plugin auto-update", "error", err)
-		return nil
-	}
-	for _, failure := range summary.Failures {
-		s.logger.WarnContext(ctx, "plugin auto-update operation failed", "error", failure)
 	}
 	return nil
 }
@@ -422,18 +423,10 @@ func (s *AutoUpdateService) autoUpdatePlugin(ctx context.Context, existing *Inst
 		Version:      newVersion,
 	})
 	if err == nil {
-		repositoryID := target.RepositoryID
 		if target.LegacyArchive {
-			_, err = s.installer.ReplaceRemote(ctx, existing, InstallArchiveRequest{
-				ArchiveURL:   target.ArchiveURL,
-				RepositoryID: &repositoryID,
-			})
+			_, err = s.installer.ReplaceRemote(ctx, existing, target.ArchiveRequest())
 		} else {
-			_, err = s.installer.ReplaceBinary(ctx, existing, InstallBinaryRequest{
-				BinaryURL:    target.ArchiveURL,
-				Checksum:     target.Checksum,
-				RepositoryID: &repositoryID,
-			})
+			_, err = s.installer.ReplaceBinary(ctx, existing, target.BinaryRequest())
 		}
 	}
 	if err != nil {
@@ -516,19 +509,11 @@ func (s *AutoUpdateService) installResolvedCatalogTarget(ctx context.Context, ta
 		return nil, fmt.Errorf("catalog install target is required")
 	}
 
-	repositoryID := target.RepositoryID
 	if target.LegacyArchive {
-		return s.installer.InstallRemote(ctx, InstallArchiveRequest{
-			ArchiveURL:   target.ArchiveURL,
-			RepositoryID: &repositoryID,
-		})
+		return s.installer.InstallRemote(ctx, target.ArchiveRequest())
 	}
 
-	return s.installer.InstallBinary(ctx, InstallBinaryRequest{
-		BinaryURL:    target.ArchiveURL,
-		Checksum:     target.Checksum,
-		RepositoryID: &repositoryID,
-	})
+	return s.installer.InstallBinary(ctx, target.BinaryRequest())
 }
 
 type autoUpdateOutcome int
@@ -539,7 +524,11 @@ const (
 	autoUpdateOutcomeNotified
 )
 
+// recordFailure masks credential assignments and URL userinfo before storing
+// the message: failures reach the server log, the task's result data, and the
+// task error shown to admins, and their text can carry repository or plugin
+// diagnostics.
 func (s *AutoUpdateSummary) recordFailure(format string, args ...any) {
 	s.FailedOperations++
-	s.Failures = append(s.Failures, fmt.Sprintf(format, args...))
+	s.Failures = append(s.Failures, logredact.SanitizeText(fmt.Sprintf(format, args...)))
 }

@@ -67,6 +67,80 @@ Trakt collections and trending send profile tokens issued to the Trakt app, so
 they read the client ID from the Trakt plugin. They fall back to the legacy
 setting only when no Trakt plugin is configured.
 
+## Connection settings
+
+A plugin can declare connection settings in its watch-sync descriptor: preferences a
+profile changes on its connection at any time, such as whether Simkl logs rewatches.
+They differ from a capability's `config_schema`, which an API-key connection collects
+once when it is made and the host does not store.
+
+- The web settings page shows each `boolean` setting as a switch with the connection's
+  other sync options. The host skips a setting whose type it does not know.
+- Values live in `watch_provider_connections.connection_settings`, a JSON object of
+  setting key to the plugin contract's string encoding (`"true"` or `"false"`). Only
+  settings the profile changed are stored. An update merges its keys, and reconnecting
+  or refreshing tokens keeps them.
+- Every authenticated RPC carries the value of each declared setting, defaults
+  included, in `WatchSyncAuthenticatedContext.connection_settings`.
+- An update with an undeclared key or a value of the wrong type is rejected before
+  anything is stored. A stored value for a setting the plugin no longer declares stays
+  in the row but is not sent.
+
+## List sync rows
+
+`watch_provider_list_items` holds one row per library item on a synced
+favorites or watchlist, unique on `(connection_id, list_kind, media_item_id)`.
+The `provider_item_key` is not unique. The key is the item's IMDb, TMDB, or TVDB
+id without its kind, and `media_items` does not keep those ids unique, so two
+items can share one: two library items for one title, or a movie and a series
+with the same TMDB id. The ratings and dropped-show rows work the same way.
+
+Several items with one key follow these rules:
+
+- A provider removal is held while another library item of the same kind,
+  still on the local list, has the key. Removing the key would take that item
+  off the provider too.
+- With removal sync on, an import does not add back an item whose local
+  removal has not reached the provider yet, unless the provider dated its
+  listing after the removal. An undated listing never counts as newer.
+- A full import counts every IMDb, TMDB, and TVDB id on a provider row as
+  present for that row's kind, since a plugin's key can use a different id than
+  the one stored at export (Trakt keys shows by TVDB id first). A row or stored
+  item without a kind matches any kind.
+- A remote tombstone removes every row with its key, and with its kind when it
+  names one. Plugin tombstones carry only the key, so one whose rows name more
+  than one kind of title changes nothing and adds a warning.
+
+## Event media
+
+Playback scrobbles, watched exports and unwatch events send a plugin the
+item's catalog `title`, `year`, `series_title` and `series_year` with its
+external IDs, so a provider can create a title it has not seen. The service
+fills them from the catalog just before the events go out, because neither
+history rows nor scrobble sessions store titles. The lookup is best effort;
+when it fails or times out, events go out with their IDs alone.
+
+A playback event looks its titles up once, after its session writes, in the
+background and detached from the caller's deadline, with a five-second cap.
+It starts before the event joins its ordered dispatch queue, so lookups for
+queued events overlap, and a slow lookup can cost the event its titles but
+never the event. A confirmed stop, which has already claimed its delivery,
+waits for that lookup for at most half of the time it has left. Lookups that
+run on the caller's context, for watched exports, unwatch events and the
+open-scrobble sweep (one lookup for all its sessions), take at most five
+seconds and at most half of the time the caller has left.
+
+An episode's `title` is its own, and its `year` is its series' year, as on
+the import side. An item whose event kind differs from its catalog kind gets
+no titles: an episode without provider IDs is sent as a movie, and must not
+arrive named after the episode.
+
+On connect, a plugin's `INVALID_REQUEST` or `PERMANENT` fault and a
+connection config the host rejects mean the profile's input can't work. The
+v2 API answers them `422 validation_failed` with the plugin's safe message,
+scrubbed of the API key and every config secret, including each value inside
+a secret field that holds a JSON object or array.
+
 ## Upgrade path
 
 Plugin auto-update installs a first-party plugin from the Silo repository when

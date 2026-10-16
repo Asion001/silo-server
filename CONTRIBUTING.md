@@ -146,7 +146,7 @@ pnpm install --frozen-lockfile
 pnpm run lint
 pnpm run format:check
 pnpm run build
-pnpm run budget:check           # launch bundle size against perf-budget.json
+pnpm run budget:check           # launch bundle size, vendor chunk, render-blocking resources
 cd ..
 make test-web
 
@@ -163,6 +163,8 @@ make verify-apiv2-fixtures
 go test -count=1 -run '^TestCommittedArtifactMatchesRouter$' ./internal/apiv2/
 make verify-local-paths
 make verify-case-collisions
+make verify-actionlint              # actionlint 1.7.12
+make verify-shellcheck              # ShellCheck 0.11.0
 ```
 
 PR CI selects Go or Web jobs from a complete diff. Shared contracts, generated

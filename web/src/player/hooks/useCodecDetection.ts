@@ -69,6 +69,18 @@ export interface HDR10PlaybackSupport {
   av1: boolean;
 }
 
+/** A small SDR HEVC stream that any hardware HEVC decoder plays in real time. */
+const HEVC_REFERENCE_CONFIGURATION = {
+  type: "file",
+  video: {
+    contentType: 'video/mp4; codecs="hvc1.1.6.L90.90"',
+    width: 640,
+    height: 360,
+    bitrate: 1_000_000,
+    framerate: 24,
+  },
+} satisfies MediaDecodingConfiguration;
+
 const AUDIO_CODEC_MAP: Record<string, string[]> = {
   aac: ['audio/mp4; codecs="mp4a.40.2"', 'video/mp4; codecs="mp4a.40.2"'],
   mp3: ["audio/mpeg"],
@@ -124,6 +136,14 @@ export function detectHDRFromMatchMedia(matchMediaFn: typeof matchMedia | undefi
  * Deliberately independent of the `dynamic-range` media query: that query
  * describes the active output, not the decoder, and browsers tone-map HDR
  * content onto SDR outputs.
+ *
+ * The configuration has to be smooth, with one exception. iOS Safari answers
+ * `smooth: false` for every HEVC configuration, even a small SDR stream that
+ * any hardware decoder plays in real time, while `powerEfficient: true` shows
+ * its hardware decoder. Where the browser answers that way for the reference
+ * stream too, its smooth flag says nothing, and a power-efficient decoder is
+ * trusted. Elsewhere `smooth: false` stands: Chromium, for one, derives it
+ * from frames dropped in earlier playback.
  */
 export async function probeHDR10PlaybackSupport(): Promise<HDR10PlaybackSupport> {
   if (typeof navigator === "undefined" || !navigator.mediaCapabilities) {
@@ -131,17 +151,24 @@ export async function probeHDR10PlaybackSupport(): Promise<HDR10PlaybackSupport>
   }
   const mediaCapabilities = navigator.mediaCapabilities;
 
-  const probe = async (configuration: MediaDecodingConfiguration): Promise<boolean> => {
+  const probe = async (
+    configuration: MediaDecodingConfiguration,
+    reference?: MediaDecodingConfiguration,
+  ): Promise<boolean> => {
     try {
       const result = await mediaCapabilities.decodingInfo(configuration);
-      return result.supported && result.smooth;
+      if (!result.supported) return false;
+      if (result.smooth) return true;
+      if (!reference || !result.powerEfficient) return false;
+      const ref = await mediaCapabilities.decodingInfo(reference);
+      return ref.supported && !ref.smooth && ref.powerEfficient;
     } catch {
       return false;
     }
   };
 
   const [hevc, av1] = await Promise.all([
-    probe(HDR10_HEVC_PROGRESSIVE_CONFIGURATION),
+    probe(HDR10_HEVC_PROGRESSIVE_CONFIGURATION, HEVC_REFERENCE_CONFIGURATION),
     probe(HDR10_AV1_PROGRESSIVE_CONFIGURATION),
   ]);
   return { hevc, av1 };

@@ -31,10 +31,13 @@ import {
   RotateCcw,
   Shuffle,
   Tags,
+  TimerReset,
+  ThumbsDown,
   UsersRound,
   Hand,
   Zap,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import AddToCollectionDialog from "@/components/AddToCollectionDialog";
 import { Button } from "@/components/ui/button";
 import {
@@ -59,6 +62,7 @@ import StarRating from "@/components/StarRating";
 import { MediaActionIcon } from "@/components/mediaActionIcons";
 import { useWatchPlaybackController } from "@/playback/watchPlaybackContext";
 import { parseWatchHref } from "@/pages/watchRouteHelpers";
+import type { TitleLink } from "@/lib/titleLinks";
 import VersionDropdown from "./VersionDropdown";
 import AudioTracksPopover from "./AudioTracksPopover";
 import SubtitlesPopover from "./SubtitlesPopover";
@@ -167,12 +171,6 @@ export interface ActionBarSecondaryAction {
   pressed?: boolean;
 }
 
-/** An external page for the title, such as IMDb or TMDB. */
-export interface ActionBarLink {
-  label: string;
-  href: string;
-}
-
 export interface ActionBarProps {
   compactMobile?: boolean;
   contentId?: string;
@@ -183,11 +181,14 @@ export interface ActionBarProps {
   /** Replaces the Play action. */
   primaryAction?: ActionBarPrimaryAction;
   secondaryActions?: ActionBarSecondaryAction[];
-  links?: ActionBarLink[];
+  /** The title's pages elsewhere, such as IMDb or TMDB. */
+  links?: TitleLink[];
   playHref?: string;
   playLabel?: string;
   playProgress?: number;
   restartHref?: string;
+  /** Clears the resume position without marking the item watched. */
+  onResetProgress?: () => void;
   resumePositionSeconds?: number;
   resumeDurationSeconds?: number;
   resumeResolution?: string;
@@ -202,6 +203,9 @@ export interface ActionBarProps {
   isFavorite?: boolean;
   onToggleWatchlist?: () => void;
   inWatchlist?: boolean;
+  /** Marks or clears Not interested; movies and series only. */
+  onToggleNotInterested?: () => void;
+  notInterested?: boolean;
   onRefresh?: (mode: RefreshItemMetadataMode) => void;
   isRefreshing?: boolean;
   /** Re-detects local markers; without redetectKind the admin picks intro, credits, or both. */
@@ -264,6 +268,7 @@ export default function ActionBar({
   playLabel = "Play",
   playProgress,
   restartHref,
+  onResetProgress,
   resumePositionSeconds,
   resumeDurationSeconds,
   watchedLabel,
@@ -274,6 +279,8 @@ export default function ActionBar({
   isFavorite = false,
   onToggleWatchlist,
   inWatchlist = false,
+  onToggleNotInterested,
+  notInterested = false,
   onRefresh,
   isRefreshing = false,
   onRedetectMarkers,
@@ -574,8 +581,10 @@ export default function ActionBar({
   };
   const hasOverflowActions = Boolean(
     restartHref ||
+    onResetProgress ||
     onShuffle ||
     onToggleWatchlist ||
+    onToggleNotInterested ||
     onDownload ||
     onSearchSubtitles ||
     onRequestSeasons,
@@ -694,20 +703,6 @@ export default function ActionBar({
           );
         })}
 
-        {links?.map((link) => (
-          <Button
-            key={link.href}
-            asChild
-            variant="glass"
-            className={`${staticGlassActionClass} h-11 cursor-pointer rounded-full px-4 text-[0.8125rem] font-semibold tracking-wide`}
-          >
-            <a href={link.href} target="_blank" rel="noreferrer">
-              {link.label}
-              <ExternalLink aria-hidden="true" className="size-3.5 opacity-60" />
-            </a>
-          </Button>
-        ))}
-
         {/* ── Watched toggle ─────────────────────────────────── */}
         {watchedLabel && onToggleWatched && (
           <Button
@@ -824,10 +819,25 @@ export default function ActionBar({
                   Play from Beginning
                 </DetailOverflowMenuItem>
               )}
+              {onResetProgress && (
+                <DetailOverflowMenuItem closeMenu={closeOverflowMenu} onAction={onResetProgress}>
+                  <TimerReset className="size-4" />
+                  Reset Progress
+                </DetailOverflowMenuItem>
+              )}
               {onToggleWatchlist && (
                 <DetailOverflowMenuItem closeMenu={closeOverflowMenu} onAction={onToggleWatchlist}>
                   {inWatchlist ? <Check className="size-4" /> : <Plus className="size-4" />}
                   {inWatchlist ? "Remove from Watchlist" : "Add to Watchlist"}
+                </DetailOverflowMenuItem>
+              )}
+              {onToggleNotInterested && (
+                <DetailOverflowMenuItem
+                  closeMenu={closeOverflowMenu}
+                  onAction={onToggleNotInterested}
+                >
+                  <ThumbsDown className={cn("size-4", notInterested && "fill-current")} />
+                  {notInterested ? "Show in Recommendations" : "Not Interested"}
                 </DetailOverflowMenuItem>
               )}
               {contentId && canAddToCollection && (
@@ -1101,6 +1111,29 @@ export default function ActionBar({
             />
           )}
         </div>
+      )}
+
+      {/* ── The title on IMDb, TMDB and TVDB ─────────────────── */}
+      {/* A row of its own, so the links never push the library actions
+          (watched, favorite, rating, more) onto another line. */}
+      {links && links.length > 0 && (
+        <ul aria-label="External links" className="detail-external-links flex flex-wrap gap-2">
+          {links.map((link) => (
+            <li key={link.href}>
+              <Button
+                asChild
+                variant="glass"
+                size="sm"
+                className={`${staticGlassActionClass} cursor-pointer rounded-full text-xs font-semibold tracking-wide`}
+              >
+                <a href={link.href} target="_blank" rel="noopener noreferrer">
+                  {link.label} <span className="sr-only">(opens in a new tab)</span>
+                  <ExternalLink aria-hidden="true" className="size-3 opacity-60" />
+                </a>
+              </Button>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );

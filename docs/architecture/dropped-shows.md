@@ -10,7 +10,8 @@ support them: Trakt, Simkl, and watch-sync plugins that advertise `sync_dropped`
 dropped. A drop is **active** while no episode of the series has watch progress, or a
 history-hide stamp (mark unwatched, remove from history), newer than `dropped_at`. So
 watching any episode again undrops the series, whichever path recorded the watch, and no
-writer needs to know about drops. Imported history keeps its original watch time, so
+writer needs to know about drops. Clearing an episode's resume position is a progress write
+too, so like mark unwatched it ends the drop. Imported history keeps its original watch time, so
 re-importing old plays never undrops a series. An inactive row means the same as no row;
 watch sync removes it.
 
@@ -23,6 +24,10 @@ dismissals.
 Undoing the dismissal (`DELETE` on the same path) undrops it. Movies, audiobooks, and
 ebooks keep per-item dismissals. Dismissing again refreshes `dropped_at`, which re-drops a
 series the profile watched since.
+
+An Emby history import also drops the shows the user hid from Emby's Continue Watching,
+dated at the run; see
+[history import execution](history-import-execution.md#continue-watching-row).
 
 ## Where drops apply
 
