@@ -24190,6 +24190,12 @@ export interface components {
        */
       watched_at: string;
     };
+    HLSSubtitleRenditionV3: {
+      format: string;
+      group_id: string;
+      mime_type: string;
+      name: string;
+    };
     HomeCapabilities: {
       /** @description Whether the current principal may use the capability */
       allowed: boolean;
@@ -27144,6 +27150,7 @@ export interface components {
     };
     PlaybackPlan: {
       applied_quirks: components["schemas"]["AppliedQuirkV3"][];
+      /** @description Fixed quality rungs a quality_change replan may request, in menu order. The source is not listed: quality_preference auto returns to it. Empty when no rung applies. */
       available_qualities: components["schemas"]["AvailableQualityV3"][];
       claims: components["schemas"]["ValidationClaimsV3"];
       decision_reason: string;
@@ -27193,7 +27200,10 @@ export interface components {
       attempted_plan_keys: string[];
       /** Format: int64 */
       bandwidth_cap_kbps?: number;
-      /** Format: int64 */
+      /**
+       * Format: int64
+       * @description Measured throughput to this server, such as a bandwidth probe result. auto sends a source whose bitrate fits 80% of it as-is and lowers only one that does not. Omit it rather than send a guess.
+       */
       bandwidth_estimate_kbps?: number;
       client_capabilities: components["schemas"]["ClientCodecCapabilitiesV3"];
       client_features?: string[];
@@ -27206,7 +27216,11 @@ export interface components {
        */
       installation_id: string;
       local_mutations?: string[];
-      metered: boolean;
+      /**
+       * @deprecated
+       * @description Deprecated; ignored. A client on a metered link sends its cellular quality as quality_preference and bandwidth_cap_kbps instead.
+       */
+      metered?: boolean;
       /** @enum {string} */
       operation?:
         | "failure_recovery"
@@ -27222,6 +27236,7 @@ export interface components {
       position_seconds: number;
       /** Format: int64 */
       protocol_version: number;
+      /** @description auto (the default), a resolution such as 1080p, or a rung label from available_qualities. auto plays the source unless the device cannot, a measured bandwidth_estimate_kbps cannot carry it, or it is above bandwidth_cap_kbps. original is a deprecated alias of auto. */
       quality_preference: string;
       /** @description Client-minted identity of this replan; a retry with the same body replays the durable decision */
       replan_request_id: string;
@@ -27647,7 +27662,10 @@ export interface components {
       audio_track_index?: number;
       /** Format: int64 */
       bandwidth_cap_kbps?: number;
-      /** Format: int64 */
+      /**
+       * Format: int64
+       * @description Measured throughput to this server, such as a bandwidth probe result. auto sends a source whose bitrate fits 80% of it as-is and lowers only one that does not. Omit it rather than send a guess.
+       */
       bandwidth_estimate_kbps?: number;
       client_capabilities: components["schemas"]["ClientCodecCapabilitiesV3"];
       client_features: string[];
@@ -27662,7 +27680,11 @@ export interface components {
        * @example 1
        */
       installation_id: string;
-      metered: boolean;
+      /**
+       * @deprecated
+       * @description Deprecated; ignored. A client on a metered link sends its cellular quality as quality_preference and bandwidth_cap_kbps instead.
+       */
+      metered?: boolean;
       playback_attempt_id: string;
       /**
        * @description Opaque identifier
@@ -27673,6 +27695,7 @@ export interface components {
       progress_persistence?: "server" | "client";
       /** Format: int64 */
       protocol_version: number;
+      /** @description auto (the default), a resolution such as 1080p, or a rung label from available_qualities. auto plays the source unless the device cannot, a measured bandwidth_estimate_kbps cannot carry it, or it is above bandwidth_cap_kbps. original is a deprecated alias of auto. */
       quality_preference: string;
       /** Format: double */
       start_position?: number;
@@ -28143,7 +28166,7 @@ export interface components {
        */
       preferred_metadata_language: string;
       /**
-       * @description Free-form until the vocabulary is ratified (#135). Canonical values today: auto, original, 720p, 1080p, 2160p, 4k; empty when unset
+       * @description Free-form until the vocabulary is ratified (#135). Canonical values today: auto, 720p, 1080p, 2160p, 4k; original is a deprecated alias of auto; empty when unset
        * @example auto
        */
       quality_preference: string;
@@ -28263,7 +28286,7 @@ export interface components {
        */
       preferred_metadata_language?: string;
       /**
-       * @description Free-form until the vocabulary is ratified (#135); v1 never validated it. Canonical values today: auto, original, 720p, 1080p, 2160p, 4k
+       * @description Free-form until the vocabulary is ratified (#135); v1 never validated it. Canonical values today: auto, 720p, 1080p, 2160p, 4k; original is a deprecated alias of auto
        * @example auto
        */
       quality_preference?: string;
@@ -28423,7 +28446,7 @@ export interface components {
        */
       preferred_metadata_language?: string | null;
       /**
-       * @description Free-form until the vocabulary is ratified (#135); v1 never validated it. Canonical values today: auto, original, 720p, 1080p, 2160p, 4k
+       * @description Free-form until the vocabulary is ratified (#135); v1 never validated it. Canonical values today: auto, 720p, 1080p, 2160p, 4k; original is a deprecated alias of auto
        * @example auto
        */
       quality_preference?: string;
@@ -30423,6 +30446,7 @@ export interface components {
     SubtitleDecisionV3: {
       artifact?: components["schemas"]["SubtitleArtifactV3"];
       embedded?: components["schemas"]["EmbeddedSubtitleV3"];
+      hls_rendition?: components["schemas"]["HLSSubtitleRenditionV3"];
       inventory: components["schemas"]["SubtitleInventoryItemV3"][];
       mode: string;
       track_id?: string;
@@ -119222,6 +119246,8 @@ export interface operations {
   getPlaybackManifest: {
     parameters: {
       query?: {
+        /** @description Set by the multivariant playlist of a plan with subtitle.hls_rendition: video selects the media playlist, subtitles the WebVTT subtitle playlist. Absent, such a plan's manifest is the multivariant playlist. */
+        silo_rendition?: "video" | "subtitles";
         /** @description Signed stream reference the plan URL carries; it reconstructs the session after a restart. Omitted for header-authenticated media. Account and viewer authorization are always required. */
         st?: string;
         /** @description Media-element fallback for the account bearer token when an Authorization header cannot be set. Header-authenticated media requires the Authorization header and the profile selector. */
@@ -119364,6 +119390,7 @@ export interface operations {
         "X-Profile-Token"?: string;
       };
       path: {
+        /** @description Segment name from the media playlist. sub_NNNNN.vtt names a WebVTT subtitle rendition segment, answered from the cues already produced; one the transcode does not reach in time is an empty WebVTT document. */
         name: string;
         session_id: string;
       };
@@ -119384,6 +119411,7 @@ export interface operations {
         content: {
           "application/octet-stream": string;
           "multipart/byteranges": string;
+          "text/vtt": string;
           "video/mp2t": string;
           "video/mp4": string;
         };
@@ -119397,6 +119425,7 @@ export interface operations {
         content: {
           "application/octet-stream": string;
           "multipart/byteranges": string;
+          "text/vtt": string;
           "video/mp2t": string;
           "video/mp4": string;
         };

@@ -21,7 +21,6 @@ import {
   buildClientCapabilitiesV3,
   buildClientPlaybackContextV3,
   detectBandwidthEstimateKbpsV3,
-  detectMeteredV3,
 } from "../client-context-v3";
 import { buildRouteEventV3 } from "../route-events-v3";
 import { reportSessionRouteEventV2 } from "../route-events-v2";
@@ -33,7 +32,7 @@ import {
   FEATURE_OUTPUT_CHANGE_V3,
   MAX_ATTEMPT_COUNT_V3,
   MAX_ATTEMPTED_PLAN_KEYS_V3,
-  QUALITY_ORIGINAL_V3,
+  normalizeQualityPreferenceV3,
   type DecisionResponseV3,
   type FailureV3,
   type PlanV3,
@@ -436,7 +435,7 @@ export function usePlaybackSession(
     audioTrackIndex: 0,
     durationSeconds: null,
     subtitleUrls: [],
-    qualityPreference: qualityPreference?.trim() || "auto",
+    qualityPreference: normalizeQualityPreferenceV3(qualityPreference),
     shouldAutoPlay: true,
     loading: true,
     replacing: false,
@@ -530,7 +529,7 @@ export function usePlaybackSession(
       reconnect?: boolean,
     ) => Promise<boolean>
   >(async () => false);
-  const qualityRef = useRef(qualityPreference?.trim() || "auto");
+  const qualityRef = useRef(normalizeQualityPreferenceV3(qualityPreference));
   // The running mid-stream reconnect, if any. `generation` invalidates the
   // timer and any request of a cycle that has ended, so nothing it started can
   // act after the viewer left, a new start took over, or a plan was adopted.
@@ -746,7 +745,6 @@ export function usePlaybackSession(
         forceStartPosition,
         explicitAudioTrackIndex: audioTrackIndex,
         subtitleTrackIndex,
-        metered: detectMeteredV3(),
         bandwidthEstimateKbps: detectBandwidthEstimateKbpsV3(),
         bandwidthCapKbps: maxBitrateKbps,
         clientCapabilities,
@@ -1075,7 +1073,7 @@ export function usePlaybackSession(
     }
     activeRequestKeyRef.current = requestKey;
     activeCapabilityRequestKeyRef.current = capabilityRequestKey;
-    qualityRef.current = qualityPreference?.trim() || "auto";
+    qualityRef.current = normalizeQualityPreferenceV3(qualityPreference);
     playbackPositionRef.current = initialPosition;
     const intentAt = takePlaybackIntent(requestKey);
     startIntentRef.current = {
@@ -1231,7 +1229,6 @@ export function usePlaybackSession(
         qualityPreference: qualityRef.current,
         attemptedPlanKeys,
         attemptCount,
-        metered: detectMeteredV3(),
         bandwidthEstimateKbps: detectBandwidthEstimateKbpsV3(),
         bandwidthCapKbps: maxBitrateKbps,
         clientCapabilities,
@@ -1464,7 +1461,7 @@ export function usePlaybackSession(
 
   const changeQuality = useCallback(
     (label: string, currentPosition: number) => {
-      const normalized = label.trim() || QUALITY_ORIGINAL_V3;
+      const normalized = normalizeQualityPreferenceV3(label);
       const previousPreference = qualityRef.current;
       qualityRef.current = normalized;
       setState((current) => ({ ...current, qualityPreference: normalized }));
