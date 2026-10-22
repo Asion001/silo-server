@@ -407,7 +407,6 @@ function WatchPagePlayer({
         index,
         tracks: playableSubtitles,
         inventoryTrack,
-        showForcedSubtitles,
       });
       for (const request of requests) {
         void sendSubtitleChoiceRequest(config, request).catch(() => {
@@ -415,7 +414,7 @@ function WatchPagePlayer({
         });
       }
     },
-    [config, seriesContext, contentId, playableSubtitles, showForcedSubtitles],
+    [config, seriesContext, contentId, playableSubtitles],
   );
 
   useEffect(() => {

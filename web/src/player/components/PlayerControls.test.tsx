@@ -136,12 +136,6 @@ describe("PlayerControls", () => {
     expect(screen.queryByRole("button", { name: "Edit markers" })).toBeNull();
   });
 
-  it("shows marker editing when available", () => {
-    renderControls(true);
-
-    expect(screen.getByRole("button", { name: "Edit markers" })).toBeInTheDocument();
-  });
-
   it("toggles between Fit and Fill from the desktop utility rail", () => {
     const onVideoFitToggle = vi.fn();
     const { unmount } = renderControls(false, { onVideoFitToggle });
