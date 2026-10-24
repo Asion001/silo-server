@@ -4,6 +4,8 @@
 .env
 .env.*
 docs/
+# The web build type-checks tests that import these shared vectors.
+!docs/design/schemas/
 node_modules
 web/node_modules
 web/dist
