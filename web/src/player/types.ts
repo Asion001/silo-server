@@ -3,6 +3,7 @@
  * Zero imports from app-specific code.
  */
 
+import type { BufferingMode } from "./buffering-quality";
 import type { SleepSetting } from "./sleepTimer";
 
 /** Subtitle display mode. */
@@ -231,6 +232,8 @@ export interface PlaybackExitState {
   lastHDR?: boolean;
   lastCodecVideo?: string;
   lastEditionKey?: string;
+  /** The file that ended was one the viewer chose; its next part keeps the choice. */
+  versionPinned?: boolean;
   destinationHref?: string;
 }
 
@@ -288,6 +291,8 @@ export interface WatchPageProps {
   title: string;
   year?: number;
   fileId?: number;
+  /** The viewer chose fileId, so Auto must not swap in another version. */
+  versionPicked?: boolean;
   libraryId?: number;
   versions: PlayerFileVersion[];
   playbackVariants?: PlayerPlaybackVariant[];
@@ -310,10 +315,11 @@ export interface WatchPageProps {
   preferredSubtitleTrackSignature?: PlayerSubtitleTrackSignature | null;
   subtitleMode?: SubtitleMode;
   showForcedSubtitles?: boolean;
-  profileLanguage?: string | null;
   intro: PlayerTimeRange | null;
   /** null while the connected server's answer is still unknown; see VideoPlayer. */
   introSkipMode?: IntroSkipMode | null;
+  /** Effective profile mode, seeded by the host before its settings read resolves. */
+  bufferingMode?: BufferingMode;
   credits: PlayerTimeRange | null;
   recap?: PlayerTimeRange | null;
   preview?: PlayerTimeRange | null;
