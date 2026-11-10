@@ -6,6 +6,7 @@ import {
   type SleepSetting,
   type SleepTimerPreset,
 } from "../sleepTimer";
+import { numberText, useT } from "@/i18n";
 
 export type { SleepSetting } from "../sleepTimer";
 
@@ -28,6 +29,7 @@ export function SleepTimerMenu({
   endOption,
   variant = "labeled",
 }: SleepTimerMenuProps) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const armed = setting.kind !== "off";
@@ -43,14 +45,24 @@ export function SleepTimerMenu({
     return () => document.removeEventListener("keydown", onKey);
   }, [open]);
 
-  const countdown = armed && remainingMs != null ? formatSleepCountdown(remainingMs) : null;
+  const countdown =
+    armed && remainingMs != null ? numberText(formatSleepCountdown(remainingMs)) : null;
   const label = countdown
     ? variant === "icon"
       ? countdown
-      : `Sleep ${countdown}`
+      : t("web.player.sleepTimer.countdown", { time: countdown })
     : variant === "icon"
       ? null
-      : "Sleep";
+      : t("web.player.sleepTimer.short");
+
+  // Default entries come from the message catalog; caller-supplied ones keep their own text.
+  const optionLabel = (key: string, fallback: string, seconds?: number): string => {
+    if (key === "off") return t("web.player.sleepTimer.turnOff");
+    if (!presets && seconds != null)
+      return t("web.player.sleepTimer.minutes", { minutes: seconds / 60 });
+    if (!endOption && key === "end") return t("web.player.sleepTimer.endOfChapter");
+    return fallback;
+  };
 
   return (
     <div ref={menuRef} className="relative" onBlur={handleBlur}>
@@ -58,10 +70,10 @@ export function SleepTimerMenu({
         type="button"
         className={`player-utility-btn flex items-center gap-1.5 ${label ? "px-2" : ""} text-xs`}
         onClick={() => setOpen((v) => !v)}
-        aria-label="Sleep timer"
+        aria-label={t("web.player.sleepTimer.trigger")}
         aria-expanded={open}
         aria-haspopup="menu"
-        title={variant === "icon" ? "Sleep timer" : undefined}
+        title={variant === "icon" ? t("web.player.sleepTimer.trigger") : undefined}
         data-active={armed ? "true" : "false"}
       >
         <Moon className={variant === "icon" ? "h-[18px] w-[18px]" : "h-3.5 w-3.5"} />
@@ -71,20 +83,24 @@ export function SleepTimerMenu({
       {open && (
         <div
           role="menu"
-          className="absolute right-0 bottom-full z-30 mb-2 flex min-w-[160px] flex-col overflow-hidden rounded-lg bg-black/90 py-1.5 shadow-xl backdrop-blur-sm"
+          className="absolute end-0 bottom-full z-30 mb-2 flex min-w-[160px] flex-col overflow-hidden rounded-lg bg-black/90 py-1.5 shadow-xl backdrop-blur-sm"
         >
           {sleepTimerOptions(armed, presets, endOption).map((option) => (
             <button
               key={option.key}
               role="menuitem"
               type="button"
-              className="w-full px-4 py-2 text-left text-sm text-white/85 hover:bg-white/10"
+              className="w-full px-4 py-2 text-start text-sm text-white/85 hover:bg-white/10"
               onClick={() => {
                 onChange(option.setting);
                 setOpen(false);
               }}
             >
-              {option.label}
+              {optionLabel(
+                option.key,
+                option.label,
+                option.setting.kind === "duration" ? option.setting.seconds : undefined,
+              )}
             </button>
           ))}
         </div>
