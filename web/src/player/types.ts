@@ -309,11 +309,19 @@ export interface PlayerSleepTimer {
   blocksAutoPlayNext: boolean;
 }
 
+/** A title's backdrop, as the watch detail sends it. */
+export interface PlayerBackdrop {
+  url?: string;
+  thumbhash?: string;
+}
+
 /** Props for the top-level WatchPage component. */
 export interface WatchPageProps {
   contentId: string;
   title: string;
   year?: number;
+  /** Shown dimmed behind the loading spinner. */
+  backdrop?: PlayerBackdrop;
   fileId?: number;
   /** The viewer chose fileId, so Auto must not swap in another version. */
   versionPicked?: boolean;
@@ -353,6 +361,8 @@ export interface WatchPageProps {
   preview?: PlayerTimeRange | null;
   autoSkipRecap?: boolean;
   autoPlayNextPreview?: boolean;
+  /** The viewer's Auto-play next episode setting; off, the Up next card does not count down. */
+  autoPlayNext?: boolean;
   canEditMarkers?: boolean;
   seriesContext?: SeriesContext;
   onNavigateEpisode?: (contentId: string, trigger: PlaybackStartTrigger) => void;

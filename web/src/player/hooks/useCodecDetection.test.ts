@@ -98,6 +98,25 @@ describe("probeMaxDecodeResolution", () => {
     expect(queried(decodingInfo)).toContain("hvc1.1.6.L93.B0 1280x720");
   });
 
+  // A decoder that keeps up with 2160p24 HDR10 but not 2160p60 keeps the
+  // 24 fps ceiling rather than losing the HDR10 claim.
+  it("claims a 24 fps HDR10 ceiling when only the 24 fps shape decodes in real time", async () => {
+    const decodingInfo = vi.fn().mockImplementation((configuration: MediaDecodingConfiguration) =>
+      Promise.resolve({
+        supported: true,
+        smooth: configuration.video?.framerate !== 60,
+        powerEfficient: false,
+      }),
+    );
+    vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
+
+    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({
+      hevc: true,
+      av1: true,
+      maxFrameRate: 24,
+    });
+  });
+
   // Chromium derives smooth from frames dropped in earlier playback, so a
   // hardware decoder that struggled at 4K is reported as not smooth there.
   it("keeps a not-smooth 4K answer when the reference stream plays smoothly", async () => {
@@ -188,7 +207,11 @@ describe("probeWebCapabilities", () => {
     vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
     vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("high") }));
 
-    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({ hevc: true, av1: true });
+    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({
+      hevc: true,
+      av1: true,
+      maxFrameRate: 60,
+    });
     expect(decodingInfo).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "file",
@@ -221,7 +244,11 @@ describe("probeWebCapabilities", () => {
       .mockResolvedValue({ supported: true, smooth: false, powerEfficient: true });
     vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
 
-    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({ hevc: true, av1: false });
+    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({
+      hevc: true,
+      av1: false,
+      maxFrameRate: 60,
+    });
     expect(decodingInfo).toHaveBeenLastCalledWith(
       expect.objectContaining({ video: expect.objectContaining({ width: 640, height: 360 }) }),
     );
@@ -239,7 +266,11 @@ describe("probeWebCapabilities", () => {
     );
     vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
 
-    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({ hevc: false, av1: false });
+    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({
+      hevc: false,
+      av1: false,
+      maxFrameRate: 0,
+    });
   });
 
   it("does not claim HDR10 for a decoder that is neither smooth nor power efficient", async () => {
@@ -248,7 +279,11 @@ describe("probeWebCapabilities", () => {
       .mockResolvedValue({ supported: true, smooth: false, powerEfficient: false });
     vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
 
-    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({ hevc: false, av1: false });
+    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({
+      hevc: false,
+      av1: false,
+      maxFrameRate: 0,
+    });
     // One probe each for HEVC and AV1; no reference probe follows.
     expect(decodingInfo).toHaveBeenCalledTimes(2);
   });
@@ -263,7 +298,11 @@ describe("probeWebCapabilities", () => {
     vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
     vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("high") }));
 
-    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({ hevc: false, av1: false });
+    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({
+      hevc: false,
+      av1: false,
+      maxFrameRate: 0,
+    });
   });
 
   it("accepts AV1 Main10 HDR10 when HEVC is unavailable", async () => {
@@ -273,7 +312,11 @@ describe("probeWebCapabilities", () => {
     });
     vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
 
-    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({ hevc: false, av1: true });
+    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({
+      hevc: false,
+      av1: true,
+      maxFrameRate: 60,
+    });
   });
 
   // Safari 26 reports `dynamic-range: standard` on XDR panels, and browsers
@@ -288,7 +331,11 @@ describe("probeWebCapabilities", () => {
     vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
     vi.stubGlobal("matchMedia", () => ({ matches: false }));
 
-    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({ hevc: true, av1: true });
+    await expect(probeHDR10PlaybackSupport()).resolves.toEqual({
+      hevc: true,
+      av1: true,
+      maxFrameRate: 60,
+    });
     expect(decodingInfo).toHaveBeenCalled();
   });
 
@@ -485,7 +532,7 @@ describe("probeWebCapabilities", () => {
       hdr10: true,
       hdr10_max_width: 3840,
       hdr10_max_height: 2160,
-      hdr10_max_frame_rate: 24,
+      hdr10_max_frame_rate: 60,
       hdr10_max_bitrate_kbps: 80_000,
     });
     expect(result.current.codecsVideo).not.toContain("hevc");
@@ -507,9 +554,9 @@ describe("probeWebCapabilities", () => {
     const { result, unmount } = renderHook(() => useCodecDetection());
     await act(async () => Promise.resolve());
 
-    // HEVC and AV1 HDR10 queries and one 4K query per codec, all issued by
-    // the warm-up.
-    expect(decodingInfo).toHaveBeenCalledTimes(6);
+    // HEVC and AV1 HDR10 queries at 24 and 60 fps and one 4K query per
+    // codec, all issued by the warm-up.
+    expect(decodingInfo).toHaveBeenCalledTimes(8);
     expect(result.current.settled).toBe(true);
     expect(result.current.hdrDetails.hdr10).toBe(true);
     expect(result.current.maxResolution).toBe("2160p");

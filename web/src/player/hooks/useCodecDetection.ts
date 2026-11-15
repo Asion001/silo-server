@@ -71,9 +71,28 @@ const HDR10_AV1_PROGRESSIVE_CONFIGURATION = {
   },
 } satisfies MediaDecodingConfiguration;
 
+// The same shapes at 60 fps. The HDR10 claim's frame-rate ceiling is the
+// fastest shape that decoded in real time, and the server refuses an HDR10
+// copy of anything faster, so a 24 fps-only probe sends every 25-60 fps HDR10
+// source to a tone-mapped transcode.
+const HDR10_HEVC_PROGRESSIVE_60FPS_CONFIGURATION = {
+  ...HDR10_HEVC_PROGRESSIVE_CONFIGURATION,
+  video: { ...HDR10_HEVC_PROGRESSIVE_CONFIGURATION.video, framerate: 60 },
+} satisfies MediaDecodingConfiguration;
+
+const HDR10_AV1_PROGRESSIVE_60FPS_CONFIGURATION = {
+  ...HDR10_AV1_PROGRESSIVE_CONFIGURATION,
+  video: { ...HDR10_AV1_PROGRESSIVE_CONFIGURATION.video, framerate: 60 },
+} satisfies MediaDecodingConfiguration;
+
+/**
+ * Which HDR10 codecs decode in real time, and the claim's frame-rate ceiling:
+ * the highest rate (60 or 24) any of them decodes, or 0 when none does.
+ */
 export interface HDR10PlaybackSupport {
   hevc: boolean;
   av1: boolean;
+  maxFrameRate: number;
 }
 
 /** A small SDR HEVC stream that any hardware HEVC decoder plays in real time. */
@@ -234,32 +253,51 @@ export function detectHDRFromMatchMedia(matchMediaFn: typeof matchMedia | undefi
 }
 
 /**
- * Probes the exact HDR10 progressive shape produced by Silo's remux path.
+ * Probes the exact HDR10 progressive shapes (HEVC and AV1) Silo can deliver.
  * Deliberately independent of the `dynamic-range` media query: that query
  * describes the active output, not the decoder, and browsers tone-map HDR
- * content onto SDR outputs. The shape has to decode in real time
- * (decodesInRealTime), checked against a small SDR HEVC reference stream.
+ * content onto SDR outputs. The HEVC shape has to decode in real time
+ * (decodesInRealTime), checked against a small SDR HEVC reference stream; the
+ * AV1 shape has to answer smooth itself. `maxFrameRate` is the highest frame
+ * rate (60 or 24) that decodes, or 0 when none does; it becomes the claim's
+ * `hdr10_max_frame_rate`.
  */
 export async function probeHDR10PlaybackSupport(): Promise<HDR10PlaybackSupport> {
   if (typeof navigator === "undefined" || !navigator.mediaCapabilities) {
-    return { hevc: false, av1: false };
+    return { hevc: false, av1: false, maxFrameRate: 0 };
   }
 
+  const hevcDecodes = (configuration: MediaDecodingConfiguration) =>
+    decodesInRealTime(configuration, HEVC_REFERENCE_CONFIGURATION).catch(() => false);
   // AV1 has no reference stream, so its shape has to answer smooth itself.
-  const probeAV1 = async (): Promise<boolean> => {
-    const result = await navigator.mediaCapabilities.decodingInfo(
-      HDR10_AV1_PROGRESSIVE_CONFIGURATION,
-    );
-    return result.supported && result.smooth;
+  const av1Decodes = (configuration: MediaDecodingConfiguration) =>
+    navigator.mediaCapabilities
+      .decodingInfo(configuration)
+      .then((result) => result.supported && result.smooth)
+      .catch(() => false);
+  // Highest frame rate the codec decodes: 60, 24, or 0.
+  const maxRate = async (
+    decodes: (configuration: MediaDecodingConfiguration) => Promise<boolean>,
+    at24: MediaDecodingConfiguration,
+    at60: MediaDecodingConfiguration,
+  ): Promise<number> => {
+    if (!(await decodes(at24))) return 0;
+    return (await decodes(at60)) ? 60 : 24;
   };
 
-  const [hevc, av1] = await Promise.all([
-    decodesInRealTime(HDR10_HEVC_PROGRESSIVE_CONFIGURATION, HEVC_REFERENCE_CONFIGURATION).catch(
-      () => false,
+  const [hevcRate, av1Rate] = await Promise.all([
+    maxRate(
+      hevcDecodes,
+      HDR10_HEVC_PROGRESSIVE_CONFIGURATION,
+      HDR10_HEVC_PROGRESSIVE_60FPS_CONFIGURATION,
     ),
-    probeAV1().catch(() => false),
+    maxRate(
+      av1Decodes,
+      HDR10_AV1_PROGRESSIVE_CONFIGURATION,
+      HDR10_AV1_PROGRESSIVE_60FPS_CONFIGURATION,
+    ),
   ]);
-  return { hevc, av1 };
+  return { hevc: hevcRate > 0, av1: av1Rate > 0, maxFrameRate: Math.max(hevcRate, av1Rate) };
 }
 
 let initialHDR10Probe: Promise<HDR10PlaybackSupport> | null = null;
@@ -495,7 +533,7 @@ export function useCodecDetection(): SettledWebCapabilityProbe {
       const probes = Promise.all([hdr10Probe, maxDecodeResolutionWithDeadline()]);
       void probes.then(([hdr10Support, maxResolution]) => {
         if (disposed || generation !== probeGeneration) return;
-        const hdr10 = hdr10Support.hevc || hdr10Support.av1;
+        const hdr10 = hdr10Support.maxFrameRate > 0;
         setCapabilities((current) => {
           const progressiveCodecsVideo = [...current.progressiveCodecsVideo];
           // Exact HDR probes can establish a progressive codec even when the
@@ -521,7 +559,7 @@ export function useCodecDetection(): SettledWebCapabilityProbe {
                     hdr10: true,
                     hdr10_max_width: 3840,
                     hdr10_max_height: 2160,
-                    hdr10_max_frame_rate: 24,
+                    hdr10_max_frame_rate: hdr10Support.maxFrameRate,
                     hdr10_max_bitrate_kbps: 80_000,
                   }
                 : {}),

@@ -1,5 +1,12 @@
 import { usePlaybackBarHeight } from "@/hooks/usePlaybackBarHeight";
+import {
+  consumeAutomaticStart,
+  expectAutomaticStart,
+  recordAutoAdvance,
+  resetStillWatchingStreak,
+} from "@/player/stillWatching";
 import { useSeekPreferences } from "@/hooks/queries/seekPreferences";
+import { useAutoPlayNextEnabled } from "@/hooks/queries/autoPlayNext";
 import {
   lazy,
   Suspense,
@@ -330,6 +337,12 @@ export function WatchPlaybackProvider({ children }: { children: ReactNode }) {
   }, [profileId, state.request]);
 
   const syncRouteRequest = useCallback((request: WatchRouteRequest) => {
+    // A post-roll start adopts its request before the route syncs, so the
+    // automatic marker is consumed whether or not the request is new.
+    const automatic = consumeAutomaticStart(request.contentId);
+    if (!automatic && stateRef.current.request?.requestKey !== request.requestKey) {
+      resetStillWatchingStreak();
+    }
     dispatch({ type: "SYNC_ROUTE_REQUEST", request });
   }, []);
 
@@ -349,6 +362,8 @@ export function WatchPlaybackProvider({ children }: { children: ReactNode }) {
   const startPlayback = useCallback(
     (input: WatchPlaybackStartInput | WatchRouteRequest, trigger: PlaybackStartTrigger) => {
       const request = normalizeWatchPlaybackRequest(input);
+      if (trigger === "viewer") resetStillWatchingStreak();
+      else expectAutomaticStart(request.contentId);
       // Press-play-to-first-frame starts here, before any navigation or
       // Picture-in-Picture exit the viewer also waits for. The route rebuilds
       // the same request key, so the player's session can claim the mark.
@@ -374,6 +389,10 @@ export function WatchPlaybackProvider({ children }: { children: ReactNode }) {
             request,
             mode: "background-bar",
           });
+          // No route follows a background start, so nothing else would use
+          // up its automatic marker, and a later pick of this title from a
+          // link would keep the count.
+          consumeAutomaticStart(request.contentId);
           return;
         }
 
@@ -671,6 +690,9 @@ function WatchPlaybackHostContent() {
     ],
     enabled: signedIn,
   });
+  // Shares the post-roll switch's query, so the credits card and the post-roll
+  // screen agree. Until the server answers, the card holds its countdown.
+  const autoPlayNext = useAutoPlayNextEnabled({ enabled: signedIn }) === true;
   const loadedBufferingMode = supportsBufferingQualityMode
     ? (effectivePlaybackSettings?.[SETTING_KEYS.PLAYBACK_BUFFERING_QUALITY_MODE]?.value as
         | BufferingMode
@@ -893,6 +915,7 @@ function WatchPlaybackHostContent() {
         return;
       }
 
+      if (trigger === "automatic") recordAutoAdvance();
       controller.startPlayback(
         {
           contentId: nextContentId,
@@ -1267,6 +1290,7 @@ function WatchPlaybackHostContent() {
           bufferingMode={bufferingMode}
           autoSkipRecap={autoSkipRecap}
           autoPlayNextPreview={autoPlayNextPreview}
+          autoPlayNext={autoPlayNext}
           canEditMarkers={canEditMarkers}
           playbackRequestKey={requestKeyValue}
           onNavigateEpisode={handleNavigateEpisode}
@@ -1423,6 +1447,7 @@ export function WatchPlaybackBar() {
               onClick={() => transport?.skipBack()}
               disabled={!transport}
               title={t("web.player.bar.skipBackTitle", { count: seekPreferences.skipBack })}
+              aria-label={t("web.player.bar.skipBackTitle", { count: seekPreferences.skipBack })}
             >
               <SkipBack className="h-4 w-4" />
             </Button>
@@ -1445,6 +1470,9 @@ export function WatchPlaybackBar() {
               onClick={() => transport?.skipForward()}
               disabled={!transport}
               title={t("web.player.bar.skipForwardTitle", { count: seekPreferences.skipForward })}
+              aria-label={t("web.player.bar.skipForwardTitle", {
+                count: seekPreferences.skipForward,
+              })}
             >
               <SkipForward className="h-4 w-4" />
             </Button>
@@ -1463,6 +1491,7 @@ export function WatchPlaybackBar() {
               className="h-10 w-10 rounded-full"
               onClick={stopPlayback}
               title={t("web.player.bar.stopTitle")}
+              aria-label={t("web.player.bar.stopTitle")}
             >
               <X className="h-4 w-4" />
             </Button>
