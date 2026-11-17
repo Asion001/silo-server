@@ -395,6 +395,9 @@ const EXIT_PROGRESS_FLUSH_TIMEOUT_MS = 1_000;
 // MediaError.MEDIA_ERR_NETWORK: the media was usable, then fetching it failed.
 const MEDIA_ERR_NETWORK = 2;
 const FIREFOX_COMPATIBILITY_FALLBACK_DELAY_MS = 8_000;
+// Fork-only sleep timer text; not in the upstream message catalog.
+const SLEEP_END_OF_EPISODE = "End of episode";
+const SLEEP_END_OF_MOVIE = "End of movie";
 /**
  * Firefox's copy-remux stall is media that arrived and still made no frame.
  * With less than this buffered past the playhead the link is slow, which the
@@ -5949,7 +5952,7 @@ export function VideoPlayer({
           title={hudTitle}
           subtitleLabel={hudSubtitle}
           sleepTimer={sleepTimer}
-          sleepEndLabel={seriesContext ? "End of episode" : "End of movie"}
+          sleepEndLabel={seriesContext ? SLEEP_END_OF_EPISODE : SLEEP_END_OF_MOVIE}
         />
       )}
 

@@ -92,6 +92,11 @@
 ./internal/catalog TestMovieBoxSetDB
 ./internal/catalog TestBoxSetCollectionArtworkDB
 
+# Audiobook Series, Authors, and Narrators browse: group counts and durations,
+# cover order, the viewer's own progress, count-sorted cursor pages, the search
+# prefix, and library access.
+./internal/catalog TestAudiobookGroupsDB
+
 # A delegated curator's provider-ID edit can't name a title in another library,
 # which a later refresh would merge the item onto, and the curator's refresh job
 # re-anchors only inside their libraries.
@@ -101,6 +106,10 @@
 # A corrected match empties an item's localized text, keeping locks and manual translations.
 ./internal/catalog TestClearMatchTextDB
 
+# Sidecar artwork saved on an unmatched item does not overwrite a match or an
+# artwork change that committed after the read.
+./internal/catalog TestUpdateProvisionalArtworkIsCompareAndSetDB
+
 # A watched special does not anchor Next Up for a series with regular seasons.
 ./internal/catalog TestNextUpSkipsSpecialAnchorsPostgres
 
@@ -109,6 +118,10 @@
 
 # A failed play-target read returns its error and the pool reuses its connection.
 ./internal/catalog TestPlayableTargetQueryFailureKeepsConnection
+
+# A book page's related rows carry the viewing profile's own finished or
+# partway state, never another profile's; browse cards name authors in credit order.
+./internal/catalog TestBookPageRelatedStateAndCardAuthorsPostgres
 
 # Series air-date sort keys advance when a known episode airs. The latest
 # available episode air date counts only episodes with a file in a library:
@@ -276,9 +289,11 @@
 ./internal/auth TestUserRepositoryUpdateAccessGroupIDDB
 ./internal/auth TestUserRepositoryUpdatePromotingToAdminClearsAccessGroupDB
 ./internal/auth TestUserRepositoryUpdateDemotingAdminAssignsDefaultAccessGroupDB
+./internal/auth TestUserRepositoryUsernameChangeRenamesPrimaryProfileDB
 ./internal/auth TestUserWithoutEmailOrUsernameDB
 ./internal/auth TestLoginIdentitySpaceDB
 ./internal/auth TestPasswordSignInForDB
+./internal/auth TestCreatePersonalAPIKeyDB
 ./internal/auth TestPasswordSignInForRoutesDB
 ./internal/auth TestLoginSessionActivityAndAdminRevocationDB
 ./internal/auth TestChangePasswordSignOutOtherSessionsDB
@@ -373,6 +388,10 @@
 # addresses, and the upgrade resets a row they shared instead of guessing.
 ./internal/notifications TestEmailPrefsStayOnTheAccountDB
 ./internal/notifications TestEmailPrefsAccountKeyMigrationResetsSharedRowsDB
+
+# One server runs the notification interest rebuild at a time, and a rebuild
+# that loses its lock session stops before it completes the checkpoint.
+./internal/notifications TestInterestRebuildRunsOnOneServerAtATimeDB
 
 # Legacy mobile registration protects account ownership under the installation lock.
 ./internal/notifications TestLegacyMobilePushRefusesForeignAccountDB
@@ -510,7 +529,7 @@
 ./internal/notifications TestRecomputeSeriesFollowsHomeRemovalsPostgres
 ./internal/notifications TestRecomputeSeriesNextUpCardSkipsSpecialAnchorPostgres
 ./internal/notifications TestRecomputeSeriesNextUpAnchorKeepsSubsecondOrderPostgres
-./internal/notifications TestRecomputeSeriesContinueWatchingKeepsWholeSecondSupersedePostgres
+./internal/notifications TestRecomputeSeriesNextUpCursorPostgres
 ./internal/notifications TestPushDeviceRepositoryUpsertApplePreservesStableIDs
 ./internal/notifications TestRetireApplePushStopsDeliveryAndOrdersAgainstRegistrationDB
 ./internal/notifications TestSendPushTestCarriesTheProfilesNewestNotification
@@ -521,10 +540,12 @@
 ./internal/notifications TestNotifyFulfilledSkipsRecipientWithoutAccess
 ./internal/notifications TestFanoutRetriesWhenRecipientScopeFails
 ./internal/notifications TestFanoutResolvesOnlyEligibleRecipients
+./internal/notifications TestFanoutNotifiesOnlyTheNextUpEpisode
 ./internal/notifications TestNotifyFulfilledRetriesWhenRecipientScopeFails
 ./internal/notifications TestNotifyFulfilledRetryResolvesOnlyUntoldRecipients
 ./internal/notifications TestDispatchOperationalResolvesBeforeHoldingConnection
 ./internal/notifications TestListNotifiedSeriesMergesLibrariesAndAppliesPreferences
+./internal/notifications TestWatchlistArrivalTellsEachWatcherOnce
 ./internal/notifications TestFanoutSkipsProfilesThatMutedTheSeries
 ./internal/notifications TestSeriesMutesList
 ./internal/notifications TestSeriesMutesUnmuteAndPurge
@@ -599,6 +620,8 @@
 ./internal/userstore/pgstore TestPostgresAtomicJellycompatProgress
 ./internal/userstore/pgstore TestPostgresJellycompatPlayedByDate
 ./internal/userstore/pgstore TestPostgresPersonalListPage
+./internal/userstore/pgstore TestPostgresCompletedHistoryPage
+./internal/userstore/pgstore TestPostgresProgressPage
 ./internal/userstore/pgstore TestPostgresReplaceCollectionItemsWritesOnlyTheDifference
 ./internal/userstore/pgstore TestPostgresRemoveHistoryItemsDeletesTheirPlaysDB
 ./internal/userstore/pgstore TestPostgresReplaceCollectionItemsWaitsOutADelete
@@ -697,6 +720,7 @@
 ./internal/partman TestDropExpiredPartitionsGivesUpOnABusyParentDB
 
 ./internal/downloads TestLocalDownloadCanceledWritePersistsFailureDB
+./internal/downloads TestEphemeralDownloadCompletesOnlyOnWholeFileDB
 ./internal/downloads TestEphemeralDownloadRechecksProfileAccessDB
 
 # Rating sources keep their merge rules, and a trigger keeps the TMDB vote pair
@@ -779,6 +803,10 @@
 # cleared or the installed version changes.
 ./internal/plugins TestInstallationStoreUpdateFailureDB
 
+# Updating an installed plugin from its catalog stops the running plugin only
+# after the new package passed its download and checksum checks.
+./internal/plugins TestServiceInstallCatalogStopsPluginOnlyForAnAcceptedPackageDB
+
 # Autoscan poll markers restart from now, and poll at once, only when the upstream changes.
 ./internal/autoscan TestUpdateSourceMarkerReset
 ./internal/autoscan TestUpdateConnectionMarkerReset
@@ -846,13 +874,15 @@
 ./internal/recommendations TestTasteProfileSubjectsSkipDeletedProfilesPostgres
 ./internal/recommendations TestTasteSeedCandidatesHonourAccessPostgres
 ./internal/recommendations TestProgressReadsMatchStoreWalkPostgres
+./internal/recommendations TestRewatchCountsReadTheWholeHistoryPostgres
 ./internal/sections TestRecommendationSectionsFillFromTheWholePoolPostgres
 ./internal/webhooksync TestWebhookEventsReportSignalChangesPostgres
 ./migrations TestPurgeOrphanedRecommendationRowsPostgres
 
 # Recommendation ranking and rows: default rows, Popular floor, genre rows, picker
 # order, taste levels, per-interest anchors, quality prior, rubric leakage,
-# media types of personal rows.
+# media types of personal rows, Because You Watched anchors per library.
+./internal/recommendations TestBecauseYouWatchedAnchorsEachLibraryOnItsOwnWatchesPostgres
 ./internal/recommendations TestCacheUserRowsDoNotAnchorOnDislikedTitlesPostgres
 ./internal/recommendations TestCatalogRankLeadsWithNotableTrustedRatingsPostgres
 ./internal/recommendations TestDefaultRowsLeaveOutASeriesRatedThroughAnEpisodePostgres
@@ -889,6 +919,7 @@
 # folder-delete reference check over the new columns, provider backfill and
 # repair of the new slots, and Jellyfin recommendations listing every backdrop.
 ./migrations TestItemExtraArtworkMigrationUpAndDownPostgres
+./migrations TestRatingsTenPointScoresMigrationUpAndDownPostgres
 ./internal/catalog TestItemExtraArtworkSlotsRoundTripDB
 ./internal/catalog TestItemBackdropRepositoryDB
 ./internal/catalog TestItemBackdropReplaceWaitsForCacheWriteDB
@@ -982,6 +1013,9 @@
 # Server collections show a restricted viewer only the members it can open, and
 # leave out a collection whose members it can open none of (#2828).
 ./internal/api/handlers TestServerCollectionCountsFollowTheViewerDB
+./internal/api/handlers TestCollectionRowCardsFollowTheViewerDB
+./internal/api/handlers TestCollectionRowCardsShowVisiblePersonalCollectionsDB
+./internal/sections TestRowOfCollectionsReferencesItsCollectionsPostgres
 
 # A scan that adds or removes titles refreshes the stored counts of the smart
 # collections drawing from that library, and only those (#3697).
@@ -1170,6 +1204,7 @@
 # could not be read, reports it so it is retried without a fallback chain.
 ./internal/backup TestBackupRestoreRoundTripDB
 ./internal/backup TestCarryOntoAnOlderKeyDropsSharedRowsDB
+./internal/backup TestCarryDropsAProfileKeyItCannotBindDB
 ./internal/backup TestCarryMovesAnswerSequencePastCarriedLinksDB
 ./internal/backup TestEncryptedS3RoundTripDB
 ./internal/backup TestFullRestoresAreSerializedDB
@@ -1191,6 +1226,7 @@
 ./internal/backup TestTemplateCollectionsAndHomeSectionsDB
 ./internal/backup TestRestoredLibrarySectionsWaitForTheRestoreDB
 ./internal/backup TestManagedSectionPointedElsewhereIsRestoredDB
+./internal/backup TestRowOfCollectionsIsRestoredDB
 ./internal/backup TestSelectiveRestoreOnOneConnectionDB
 ./internal/backup TestUnverifiedRestoreLeavesCostlyWorkOffDB
 ./internal/backup TestRestoreItemWritesDoNotGrowDB
@@ -1289,6 +1325,46 @@
 # kept, which the title's deleted aliases no longer give.
 ./internal/watchlist TestWatchSyncFindsThePromotedItemByKeptIDsDB
 
+# A watchlist read that promoted an entry before the notification fanout ran,
+# on a user store outside PostgreSQL, still leaves the profile for the arrival
+# notice through the promotion record; past the horizon it no longer counts.
+./internal/watchlist TestArrivalFindsAnEntryPromotedOutsidePostgresDB
+
 # Smart collection collage records: a refresh deletes the collection's records
 # nobody refreshed for a week, with or without a collage, and keeps the rest.
 ./internal/catalog TestSmartCollageRecordsRetireWhenUnrefreshedDB
+
+# Transcode node keys: issuing stores only ciphertext and moves neither the
+# admin revision nor the pool generation, proxies and missing rows are
+# refused, and the credential registry loads disabled nodes and rotations.
+# Two transcode nodes cannot share a canonical URL.
+./internal/nodepool TestIssueNodeKeyDB
+./internal/nodepool TestTranscodeNodeURLsAreUniqueDB
+
+# Transcode node source access: local or core is stored configuration that
+# moves the admin revision and pool generation; a proxy can only hold local,
+# refused by the store and by the check constraint.
+./internal/nodepool TestSourceAccessIsTranscodeConfigurationDB
+
+# Admin node writes reach every credential registry: the writing API server's
+# before it answers (a deleted node's key is refused at once, a moved node is
+# signable at its new URL, a disabled one keeps its key), a proxy's through
+# node_pool_changed, and another API server's through its reconciliation.
+./cmd/silo TestNodeWritesReachEveryCredentialRegistryDB
+
+# Transcode node control plane: the core authenticates node calls against the
+# real credential registry (a disabled node keeps its access; a proxy row, a
+# keyless or deleted node is refused), and stores a node's shipped log entries
+# under the authenticated node with timestamps clamped to the core's window and
+# a client_ip that is not an address cleared, so the batch stores in one insert.
+./internal/nodecontrol TestRequireNodeWithTheCredentialRegistryDB
+./internal/opslog TestInsertNodeBatchStampsTheNodeAndClearsABadAddressDB
+./internal/opslog TestInsertNodeBatchClampsTimestampsDB
+
+# A transcode node's source grant is honored only while the catalog has its
+# exact media file: the row id, at exactly the granted path, not missing.
+./internal/scanner TestFileRepositoryIsActiveFileDB
+
+# Frame posters list only movies whose poster slot is empty with nothing on its
+# way, and a frame is saved only while the slot is still empty with the source read.
+./internal/catalog TestFramePostersListOnlyEmptySlotsAndSaveOnlyOverThemDB

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"math/rand/v2"
 	"slices"
 	"testing"
 	"time"
@@ -162,8 +163,19 @@ func TestPositiveTasteItemsKeepsPositiveTitlesOnly(t *testing.T) {
 // axisVector is a full-width vector pointing along axis, nudged along the
 // axes in nudges, so test items sit next to each other and away from the
 // rest of a shared test database.
+//
+// Every component also gets random noise far below the nudges. Without it,
+// each vector sits at exactly the same distance from every other test's
+// vectors, and sibling items at exactly the same distance from each other.
+// The HNSW index breaks those ties against new elements, so once neighbor
+// lists are full (after a vacuum refills them, or when a test seeds dozens
+// of siblings) items can be inserted with no incoming edges, and the index
+// scan never reaches them.
 func axisVector(axis int, nudges map[int]float32) []float32 {
 	v := make([]float32, CanonicalEmbeddingDimensions)
+	for i := range v {
+		v[i] = rand.Float32() * 1e-4
+	}
 	v[axis] = 1
 	for i, n := range nudges {
 		v[i] += n
@@ -562,7 +574,7 @@ func TestRefreshClearsATasteProfileWithNoPositiveSignalPostgres(t *testing.T) {
 		if _, err := pool.Exec(ctx, `
 			INSERT INTO user_ratings(user_id, profile_id, media_item_id, rating) VALUES($1, $2, $3, $4)
 			ON CONFLICT (user_id, profile_id, media_item_id) DO UPDATE SET rating = EXCLUDED.rating, rated_at = NOW()`,
-			userID, profile, movie, stars); err != nil {
+			userID, profile, movie, catalog.ScoreFromStars(stars)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -688,7 +700,7 @@ func TestRefreshCountsPositiveTitlesForTheLevelPostgres(t *testing.T) {
 		{
 			name: "one title rated, favorited and finished",
 			seed: func(u int, p string) {
-				exec(`INSERT INTO user_ratings(user_id, profile_id, media_item_id, rating) VALUES($1, $2, $3, 5)`, u, p, movies[3])
+				exec(`INSERT INTO user_ratings(user_id, profile_id, media_item_id, rating) VALUES($1, $2, $3, 10)`, u, p, movies[3])
 				favorite(u, p, movies[3])
 				finish(u, p, movies[3])
 			},
@@ -767,7 +779,7 @@ func TestRefreshWeighsAThreeStarCompletionBelowAnUnratedOnePostgres(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO user_ratings(user_id, profile_id, media_item_id, rating) VALUES($1, $2, $3, 3)`, userID, profile, meh); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO user_ratings(user_id, profile_id, media_item_id, rating) VALUES($1, $2, $3, 6)`, userID, profile, meh); err != nil {
 		t.Fatal(err)
 	}
 

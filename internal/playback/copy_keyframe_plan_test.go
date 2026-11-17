@@ -22,7 +22,7 @@ import (
 func stubKeyframeIndex(t *testing.T, idx keyframes.Index, err error) {
 	t.Helper()
 	previous := loadKeyframeIndex
-	loadKeyframeIndex = func(string) (keyframes.Index, error) { return idx, err }
+	loadKeyframeIndex = func(context.Context, string) (keyframes.Index, error) { return idx, err }
 	t.Cleanup(func() { loadKeyframeIndex = previous })
 	// The source starts with its first keyframe unless a test says otherwise.
 	start := 0.0
@@ -355,6 +355,49 @@ func TestRecipeOptsKeepsAPlannedSessionAtItsStart(t *testing.T) {
 	unplanned := &TranscodeSession{opts: opts}
 	if got := unplanned.RecipeOpts(); got.SeekSeconds != 4 || got.StartSegmentNumber != 2 {
 		t.Fatalf("unplanned recipe = seek %v, segment %d; want its own start", got.SeekSeconds, got.StartSegmentNumber)
+	}
+}
+
+// A session records whether it serves a keyframe plan, which
+// KeyframePlaylist only asks for, whatever its caller passed: a node attests
+// it, and an audio switch on the node restarts only a planned session from
+// the beginning (#4044).
+func TestStartTranscodeRecordsWhetherItPlanned(t *testing.T) {
+	dir := t.TempDir()
+	ffmpeg := filepath.Join(dir, "ffmpeg")
+	if err := os.WriteFile(ffmpeg, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "episode.mkv")
+	if err := os.WriteFile(input, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		index error
+		want  bool
+	}{
+		{name: "planned", want: true},
+		{name: "no keyframe index", index: keyframes.ErrNoIndex, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubKeyframeIndex(t, keyframes.Index{Keyframes: []float64{0, 2, 4, 6, 8}, VideoEnd: 10}, tc.index)
+			opts := plannedOpts()
+			opts.InputPath, opts.OutputDir, opts.FFmpegPath = input, filepath.Join(t.TempDir(), "out"), ffmpeg
+			opts.SourceVideoCodec, opts.HWAccel = "h264", HWAccelNone
+			opts.KeyframePlanned = !tc.want
+			s, err := StartTranscode(t.Context(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			if got := s.Opts().KeyframePlanned; got != tc.want {
+				t.Fatalf("KeyframePlanned = %t, want %t", got, tc.want)
+			}
+			if got := s.RecipeOpts().KeyframePlanned; got != tc.want {
+				t.Fatalf("recipe KeyframePlanned = %t, want %t", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -707,7 +750,7 @@ func TestPlannedCopySessionMatchesFFmpeg(t *testing.T) {
 //nolint:funlen,gocyclo // One end-to-end walk through a planned session; its steps share the running FFmpeg's state.
 func checkPlannedCopySession(t *testing.T, ctx context.Context, ffmpeg, source string) {
 	dir := t.TempDir()
-	if _, err := keyframes.Load(source); err != nil {
+	if _, err := keyframes.Load(t.Context(), source); err != nil {
 		t.Fatal(err)
 	}
 
@@ -930,7 +973,7 @@ func checkPlannedAudioSwitchAtTheStart(t *testing.T, ctx context.Context, ffmpeg
 	if out, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput(); err != nil {
 		t.Skipf("ffmpeg can't make the test file (%v): %s", err, out)
 	}
-	if _, err := keyframes.Load(source); err != nil {
+	if _, err := keyframes.Load(t.Context(), source); err != nil {
 		t.Fatal(err)
 	}
 	opts := TranscodeOpts{
@@ -1074,7 +1117,7 @@ func TestPlannedRestartKeepsTheFromStartTimeline(t *testing.T) {
 		"-c:a", "aac", source).CombinedOutput(); err != nil {
 		t.Skipf("ffmpeg can't make the test file (%v): %s", err, out)
 	}
-	if _, err := keyframes.Load(source); err != nil {
+	if _, err := keyframes.Load(t.Context(), source); err != nil {
 		t.Fatal(err)
 	}
 	start := func(label string, restartAt int) float64 {

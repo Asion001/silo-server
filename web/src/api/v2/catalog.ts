@@ -91,6 +91,7 @@ export function catalogItemFromV2(item: CatalogItemV2): CatalogCardItem {
     sort_metrics: item.sort_metrics,
     badges: item.badges,
     user_state: item.user_state,
+    authors: item.authors,
     upcoming_event: item.upcoming_event
       ? {
           ...item.upcoming_event,
@@ -115,6 +116,19 @@ export function sectionFromV2(section: SectionV2): ResolvedSection {
     is_custom: section.is_custom,
     customized: section.customized,
     items: section.items.map(catalogItemFromV2),
+    ...(section.collections?.length && {
+      collections: section.collections.map((card) => ({
+        id: card.id,
+        source: card.source,
+        title: card.title,
+        poster_url: card.poster_url,
+        poster_thumbhash: card.poster_thumbhash,
+        poster_is_collage: card.poster_is_collage,
+        item_count: card.item_count,
+        ...(card.library_id !== undefined && { library_id: Number(card.library_id) }),
+        ...(card.creator_profile_id && { creator_profile_id: card.creator_profile_id }),
+      })),
+    }),
     ...(section.has_more && { has_more: true }),
     ...sectionTitleKey(section),
   };

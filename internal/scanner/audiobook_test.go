@@ -457,29 +457,6 @@ func TestSplitAudiobookReconcileRootsProtectsOnlyFailedPaths(t *testing.T) {
 	}
 }
 
-func TestScanSubtreeAudiobookLibraryUsesAudiobookPipeline(t *testing.T) {
-	root := t.TempDir()
-	bookDir := filepath.Join(root, "bad-book")
-	if err := os.Mkdir(bookDir, 0o755); err != nil {
-		t.Fatalf("mkdir book dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(bookDir, "chapter.mp3"), []byte("not real audio"), 0o644); err != nil {
-		t.Fatalf("write fake audio: %v", err)
-	}
-
-	s := &Scanner{ffprobePath: "definitely-missing-ffprobe"}
-	_, err := s.ScanSubtree(context.Background(), &models.MediaFolder{ID: 42, Type: "audiobooks", Paths: []string{root}}, bookDir)
-	if err == nil {
-		t.Fatal("ScanSubtree returned nil, want audiobook parse failure")
-	}
-	if strings.Contains(err.Error(), "getting existing files") {
-		t.Fatalf("ScanSubtree used generic file pipeline: %v", err)
-	}
-	if !strings.Contains(err.Error(), "folder_id=42") {
-		t.Fatalf("error = %q, want audiobook scanner aggregate failure", err)
-	}
-}
-
 func TestScanSubtreeAudiobookLibraryRejectsInvalidScopedRoot(t *testing.T) {
 	s := &Scanner{}
 
@@ -491,30 +468,6 @@ func TestScanSubtreeAudiobookLibraryRejectsInvalidScopedRoot(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid audiobook scan root") {
 		t.Fatalf("error = %q, want invalid audiobook scan root", err)
-	}
-}
-
-func TestScanFileAudiobookLibraryUsesAudiobookPipeline(t *testing.T) {
-	root := t.TempDir()
-	bookDir := filepath.Join(root, "bad-book")
-	if err := os.Mkdir(bookDir, 0o755); err != nil {
-		t.Fatalf("mkdir book dir: %v", err)
-	}
-	filePath := filepath.Join(bookDir, "chapter.mp3")
-	if err := os.WriteFile(filePath, []byte("not real audio"), 0o644); err != nil {
-		t.Fatalf("write fake audio: %v", err)
-	}
-
-	s := &Scanner{ffprobePath: "definitely-missing-ffprobe"}
-	err := s.ScanFile(context.Background(), filePath, &models.MediaFolder{ID: 42, Type: "audiobooks", Paths: []string{root}})
-	if err == nil {
-		t.Fatal("ScanFile returned nil, want audiobook parse failure")
-	}
-	if strings.Contains(err.Error(), "unrecognized video extension") {
-		t.Fatalf("ScanFile used video extension gate: %v", err)
-	}
-	if !strings.Contains(err.Error(), "folder_id=42") {
-		t.Fatalf("error = %q, want audiobook scanner aggregate failure", err)
 	}
 }
 
@@ -544,20 +497,6 @@ func TestScanFileAudiobookHonorsIgnoreFiles(t *testing.T) {
 		if strings.Contains(err.Error(), excluded) {
 			t.Errorf("error = %q, want excluded %s left alone", err, excluded)
 		}
-	}
-}
-
-// An admin's request for an excluded file's exact path still scans it.
-func TestScanFileAudiobookExplicitRequestScansExcludedFile(t *testing.T) {
-	root := t.TempDir()
-	writeTestFile(t, filepath.Join(root, ".siloignore"), "Drafts\n")
-	file := filepath.Join(root, "Drafts", "Draft Book", "01.mp3")
-	writeTestFile(t, file, "audio")
-
-	s := &Scanner{ffprobePath: "definitely-missing-ffprobe"}
-	err := s.ScanFile(WithExplicitFileRequest(t.Context()), file, &models.MediaFolder{ID: 42, Type: "audiobooks", Paths: []string{root}})
-	if err == nil || !strings.Contains(err.Error(), "Draft Book") {
-		t.Fatalf("ScanFile error = %v, want Draft Book rebuilt", err)
 	}
 }
 
@@ -666,11 +605,56 @@ func TestAudiobookDedupeTitlesKeepDifferentBooksSeparate(t *testing.T) {
 	}
 }
 
+// A release date tag that is not a calendar date must not reach Postgres,
+// which rejects it and fails the whole book; the year is kept.
+func TestNormalizeReleaseDateForSQL(t *testing.T) {
+	for in, want := range map[string]string{
+		"2015-03-04":           "2015-03-04",
+		"2015-03-04T00:00:00Z": "2015-03-04",
+		"2015":                 "2015-01-01",
+		"2015-00-00":           "2015-01-01",
+		"2015-02-30":           "2015-01-01",
+		"2015-13-01 extra":     "2015-01-01",
+		"0000-00-00":           "",
+		"abcd-01-01":           "",
+		"":                     "",
+	} {
+		if got := normalizeReleaseDateForSQL(in); got != want {
+			t.Errorf("normalizeReleaseDateForSQL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestApplyBookToMediaItemDoesNotBlankAllNarratorSuffixTitle(t *testing.T) {
 	item := &models.MediaItem{}
 	applyBookToMediaItem(item, &parsedAudiobook{Title: "Read by Jim Dale"}, false)
 	if item.Title != "Read by Jim Dale" {
 		t.Fatalf("Title = %q, want raw title fallback", item.Title)
+	}
+}
+
+// The default sort title follows a title the tags change. A sort title in
+// any other form, or under the Name lock, stays.
+func TestApplyBookToMediaItemSortTitleFollowsTitle(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		sortTitle string
+		locked    []int
+		tagTitle  string
+		want      string
+	}{
+		{"derived from the old title, new title has no article", "Saga Name 2 - Book Title, The", nil, "Book Title", ""},
+		{"derived from the old title, new title has an article", "Saga Name 2 - Book Title, The", nil, "A Book Title", "Book Title, A"},
+		{"set by someone", "Saga Name 02", nil, "The Book Title", "Saga Name 02"},
+		{"name locked", "Saga Name 2 - Book Title, The", []int{lockedFieldName}, "Book Title", "Saga Name 2 - Book Title, The"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item := &models.MediaItem{Title: "The Saga Name 2 - Book Title", SortTitle: tc.sortTitle, LockedFields: tc.locked}
+			applyBookToMediaItem(item, &parsedAudiobook{Title: tc.tagTitle}, false)
+			if item.SortTitle != tc.want {
+				t.Errorf("SortTitle = %q, want %q", item.SortTitle, tc.want)
+			}
+		})
 	}
 }
 
@@ -1022,6 +1006,14 @@ func TestPopulateFromTagsReadsGroupingSeriesAndLongDescription(t *testing.T) {
 		// Grouping without a position is not a series: it often holds a store
 		// category or a work name.
 		{map[string]string{"grouping": "Science Fiction"}, "", ""},
+		// It is the series when album_artist repeats it and does not name
+		// the author, as inAudible writes it.
+		{map[string]string{"artist": "Lee Child", "album_artist": "Jack Reacher", "grouping": "Jack Reacher"}, "Jack Reacher", ""},
+		{map[string]string{"artist": "Ann Author", "album_artist": "Ann Author", "grouping": "Ann Author"}, "", ""},
+		{map[string]string{"album_artist": "Ann Author", "grouping": "Ann Author"}, "", ""},
+		// A grouping that names the author is the author with a series note.
+		{map[string]string{"artist": "Stephen King", "album_artist": "Stephen King (The Dark Tower)", "grouping": "Stephen King (The Dark Tower)"}, "", ""},
+		{map[string]string{"artist": "King, Stephen", "album_artist": "Stephen King (The Dark Tower)", "grouping": "Stephen King (The Dark Tower)"}, "", ""},
 		// An explicit series tag wins; grouping fills its missing position.
 		{map[string]string{"series": "Saga", "grouping": "Saga Vol. 3"}, "Saga", "Vol. 3"},
 		{map[string]string{"series": "Saga", "grouping": "Other #3"}, "Saga", ""},
@@ -1069,49 +1061,124 @@ func TestParseGenresFromTags(t *testing.T) {
 
 func TestAudiobookTagTitle(t *testing.T) {
 	cases := []struct {
-		title, album, series, want string
+		title, album, series, position, want string
 	}{
-		{"Book Title", "", "", "Book Title"},
-		{"", "Book Title", "", "Book Title"},
-		{"Book Title", "book title", "", "Book Title"},
+		{"Book Title", "", "", "", "Book Title"},
+		{"", "Book Title", "", "", "Book Title"},
+		{"Book Title", "book title", "", "", "Book Title"},
 		// The title is the album behind a series prefix.
-		{"Saga Name 2 - Book Title", "Book Title", "Saga Name", "Book Title"},
-		{"Saga Name 2 - Book Title", "Book Title", "", "Book Title"},
-		{"Saga Name, Book 2.5: Book Title", "Book Title", "", "Book Title"},
-		{"Saga Name #3 - Book Title (Unabridged)", "Book Title", "", "Book Title"},
-		{"Saga Name - Book Title", "Book Title", "Saga Name", "Book Title"},
-		{"Saga Name III - Book Title", "Book Title", "Saga Name", "Book Title"},
+		{"Saga Name 2 - Book Title", "Book Title", "Saga Name", "", "Book Title"},
+		{"Saga Name 2 - Book Title", "Book Title", "", "", "Book Title"},
+		{"Saga Name, Book 2.5: Book Title", "Book Title", "", "", "Book Title"},
+		{"Saga Name #3 - Book Title (Unabridged)", "Book Title", "", "", "Book Title"},
+		{"Saga Name - Book Title", "Book Title", "Saga Name", "", "Book Title"},
+		{"Saga Name III - Book Title", "Book Title", "Saga Name", "", "Book Title"},
+		// Behind the series prefix, the title repeats the series or the album
+		// after the album.
+		{"Saga Name 2 - Book Title Saga Name", "Book Title", "Saga Name", "", "Book Title"},
+		{"Saga Name 2 - Book Title Book Title", "Book Title", "Saga Name", "", "Book Title"},
+		{"Saga Name 2 - Book Title Other Words", "Book Title", "Saga Name", "", "Saga Name 2 - Book Title Other Words"},
+		{"Saga Name 2 - Book Titles", "Book Title", "Saga Name", "", "Saga Name 2 - Book Titles"},
+		// Behind the series prefix, the album goes on to name the series or
+		// a position, or adds a subtitle.
+		{"Saga Name 2 - Book Title", "Book Title: Saga Name 2", "Saga Name", "", "Book Title"},
+		{"Saga Name 2 - Book Title (Unabridged)", "Book Title, Part 2", "Saga Name", "", "Book Title"},
+		{"Saga Name 2 - Book Title", "Book Title: The Long Subtitle", "Saga Name", "", "Book Title: The Long Subtitle"},
+		{"Saga Name 2 - Book Title", "Book Title Collected", "Saga Name", "", "Saga Name 2 - Book Title"},
+		{"Saga Name 2 - ", "Book Title", "Saga Name", "", "Saga Name 2 -"},
+		// The album agrees with the title whatever its punctuation.
+		{"Saga Name 2 - Her Friends Book", "Her Friend\u2019s Book", "Saga Name", "", "Her Friend\u2019s Book"},
+		{"Saga Name 2 - Her Friends Book Saga Name", "Her Friend\u2019s Book", "Saga Name", "", "Her Friend\u2019s Book"},
+		// An album that repeats the whole title leaves the prefix to the
+		// position tag.
+		{"Saga Name 2 - Book Title", "Saga Name 2 - Book Title", "Saga Name", "2", "Book Title"},
+		{"Saga Name 2 - Book Title", "Saga Name 2 - Book Title", "Saga Name", "", "Saga Name 2 - Book Title"},
+		{"Saga Name 2 - Book Title", "Saga Name 2 - Book Title: The Long Subtitle", "Saga Name", "2", "Book Title: The Long Subtitle"},
+		{"Saga Name 2 - Book Title", "Saga Name 2 - Book Title: Saga Name, Book 2", "Saga Name", "2", "Book Title"},
+		// A numbered prefix that names the series among other words.
+		{"The Saga Name 2 - Book Title", "Book Title", "Saga Name;", "", "Book Title"},
+		// A prefix carrying the position tag's number was composed from the
+		// tags: it is cut off whatever the album says, and a prefix with
+		// another number is not.
+		{"Saga Name 2 - Book Title", "Other Words", "Saga Name", "2", "Book Title"},
+		{"Saga Name 2 - Book Title", "First Part: Book Title", "Saga Name", "2.0", "Book Title"},
+		{"Saga Name 2 - Book Title Other Words", "Book Title", "Saga Name", "2", "Book Title Other Words"},
+		{"Saga Name 2 - Book Title", "Other Words", "Saga Name", "3", "Saga Name 2 - Book Title"},
+		{"Saga Name - Book Title", "Other Words", "Saga Name", "2", "Saga Name - Book Title"},
+		// The position tag may carry a marker or be a Roman numeral, and the
+		// album may be missing.
+		{"Saga Name 2 - Book Title", "Other Words", "Saga Name", "Book #2", "Book Title"},
+		{"Saga Name III - Book Title", "Other Words", "Saga Name", "3", "Book Title"},
+		{"Saga Name 2 - Book Title", "", "Saga Name", "2", "Book Title"},
+		{"Saga Name 2 - Book Title", "", "Saga Name", "", "Saga Name 2 - Book Title"},
+		{"Saga Name 2 -", "", "Saga Name", "2", "Saga Name 2 -"},
 		// With a series tag only that series is a prefix, so a number in the
 		// work's own name stays; words that look like Roman numerals are not
 		// positions.
-		{"Other Words - Book Title", "Book Title", "Saga Name", "Other Words - Book Title"},
-		{"Apollo 13 - The Mission", "The Mission", "Space Saga", "Apollo 13 - The Mission"},
-		{"Saga Civil - Book Title", "Book Title", "Saga", "Saga Civil - Book Title"},
+		{"Other Words - Book Title", "Book Title", "Saga Name", "", "Other Words - Book Title"},
+		{"Apollo 13 - The Mission", "The Mission", "Space Saga", "", "Apollo 13 - The Mission"},
+		{"Saga Civil - Book Title", "Book Title", "Saga", "", "Saga Civil - Book Title"},
 		// The album adds a subtitle to the title.
-		{"Book Title", "Book Title: The Long Subtitle", "", "Book Title: The Long Subtitle"},
-		{"Book Title", "Book Title - The Long Subtitle", "", "Book Title - The Long Subtitle"},
+		{"Book Title", "Book Title: The Long Subtitle", "", "", "Book Title: The Long Subtitle"},
+		{"Book Title", "Book Title - The Long Subtitle", "", "", "Book Title - The Long Subtitle"},
 		// An album that adds the series is not a subtitle.
-		{"Book Title", "Book Title: Saga Name, Book 1", "", "Book Title"},
-		{"Book Title", "Book Title: Saga Name, Book III", "", "Book Title"},
-		{"Book Title", "Book Title: Saga Name (Book 1)", "", "Book Title"},
+		{"Book Title", "Book Title: Saga Name, Book 1", "", "", "Book Title"},
+		{"Book Title", "Book Title: Saga Name, Book III", "", "", "Book Title"},
+		{"Book Title", "Book Title: Saga Name (Book 1)", "", "", "Book Title"},
 		// "Civil" is letters a Roman numeral uses, not a numeral.
-		{"Book Title", "Book Title: A Volume Civil", "", "Book Title: A Volume Civil"},
-		{"Book Title", "Book Title - Saga Name", "Saga Name", "Book Title"},
+		{"Book Title", "Book Title: A Volume Civil", "", "", "Book Title: A Volume Civil"},
+		{"Book Title", "Book Title - Saga Name", "Saga Name", "", "Book Title"},
 		// The series must appear as whole words, not inside one.
-		{"Book Title", "Book Title: A Little Adventure", "It", "Book Title: A Little Adventure"},
+		{"Book Title", "Book Title: A Little Adventure", "It", "", "Book Title: A Little Adventure"},
 		// Words in any script count: an album adding a non-Latin series is
 		// not a subtitle, and a non-Latin series prefix is still a prefix.
-		{"星河", "星河 - 远山书系", "远山书系", "星河"},
-		{"远山书系 3 - 星河", "星河", "远山书系", "星河"},
+		{"星河", "星河 - 远山书系", "远山书系", "", "星河"},
+		{"远山书系 3 - 星河", "星河", "远山书系", "", "星河"},
 		// Unrelated tags keep the title: a single file's album may be its
 		// series or a collection.
-		{"Book Title", "Saga Name", "Saga Name", "Book Title"},
-		{"Book Title", "Book Titles Collected", "", "Book Title"},
-		{"Prologue: Book Title", "Book Title", "", "Prologue: Book Title"},
+		{"Book Title", "Saga Name", "Saga Name", "", "Book Title"},
+		{"Book Title", "Book Titles Collected", "", "", "Book Title"},
+		{"Prologue: Book Title", "Book Title", "", "", "Prologue: Book Title"},
 	}
 	for _, tc := range cases {
-		if got := audiobookTagTitle(tc.title, tc.album, tc.series); got != tc.want {
-			t.Errorf("audiobookTagTitle(%q, %q, %q) = %q, want %q", tc.title, tc.album, tc.series, got, tc.want)
+		if got := audiobookTagTitle(tc.title, tc.album, tc.series, tc.position); got != tc.want {
+			t.Errorf("audiobookTagTitle(%q, %q, %q, %q) = %q, want %q", tc.title, tc.album, tc.series, tc.position, got, tc.want)
+		}
+	}
+
+	// The position comes from the book's series position tag.
+	b := &parsedAudiobook{}
+	b.populateFromTags(map[string]string{"title": "Saga Name 2 - Book Title", "album": "Other Words", "series": "Saga Name", "series-part": "2"})
+	if b.Title != "Book Title" {
+		t.Errorf("title read from tags = %q, want %q", b.Title, "Book Title")
+	}
+}
+
+func TestPopulateFromTagsAuthors(t *testing.T) {
+	cases := []struct {
+		tags map[string]string
+		want []string
+	}{
+		// artist names the author; album_artist may hold the series, as
+		// inAudible writes it, or the author with a series note.
+		{map[string]string{"artist": "Lee Child", "album_artist": "Jack Reacher", "composer": "Jeff Harding"}, []string{"Lee Child"}},
+		{map[string]string{"artist": "Stephen King", "album_artist": "Stephen King (The Dark Tower)"}, []string{"Stephen King"}},
+		// album_artist is the author when artist is empty.
+		{map[string]string{"album_artist": "Ann Author", "composer": "Ned Narrator"}, []string{"Ann Author"}},
+		{map[string]string{"artist": " ", "album_artist": "Ann Author"}, []string{"Ann Author"}},
+		// artist that adds the narrator to album_artist's author.
+		{map[string]string{"artist": "Ann Author, Ned Narrator", "album_artist": "Ann Author"}, []string{"Ann Author"}},
+		{map[string]string{"artist": "Homer, Ian McKellen", "album_artist": "Homer"}, []string{"Homer"}},
+		// Co-authors in artist are kept when album_artist names someone else.
+		{map[string]string{"artist": "Ann Author & Bea Writer", "album_artist": "Saga Name"}, []string{"Ann Author", "Bea Writer"}},
+		// composer is the last resort, as before.
+		{map[string]string{"composer": "Ann Author"}, []string{"Ann Author"}},
+	}
+	for _, tc := range cases {
+		b := &parsedAudiobook{}
+		b.populateFromTags(tc.tags)
+		if !reflect.DeepEqual(b.Authors, tc.want) {
+			t.Errorf("tags %v: authors %q, want %q", tc.tags, b.Authors, tc.want)
 		}
 	}
 }

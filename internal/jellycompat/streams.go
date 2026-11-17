@@ -832,6 +832,13 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 		writeCompatUpstreamError(w, err)
 		return
 	}
+	// A denied session is refused before route resolution reserves node
+	// capacity or a node job starts: the relay below forwards to the node it
+	// starts, and refusing only then would leave both behind.
+	if h.remoteCompatDenied(r.Context(), playSession) {
+		writeCompatSessionEnded(w)
+		return
+	}
 
 	requiredToneMapMode := tonemap.Mode("")
 	excludedNodes := make(map[string]struct{})
@@ -872,7 +879,7 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 		tcNode := plan.TranscodeNode
 		initialSeekSeconds, _ := compatInitialTranscodePosition(*source, h.compatSegmentDuration(), playSession.InitialSeekSeconds)
 		remoteNodeURL := tcNode.URL
-		startErr := h.startRemoteTranscodeWithToneMapMode(r.Context(), playSession.ID, playSession.UpstreamSessionID, *source, file, initialSeekSeconds, tcNode.URL, requiredToneMapMode)
+		startErr := h.startRemoteTranscodeWithToneMapMode(r.Context(), playSession.ID, playSession.UpstreamSessionID, *source, file, initialSeekSeconds, tcNode.URL, requiredToneMapMode, false)
 		if errors.Is(startErr, errRemoteStartAdoptedLocal) {
 			// Route resolution reserved the remote candidate before the concurrent
 			// local winner was observed. Neither the allowed local continuation nor
@@ -1089,6 +1096,10 @@ func (h *PlaybackHandler) HandleHLSManifest(w http.ResponseWriter, r *http.Reque
 	// Before ensureTranscodeManifest, for the same reason as the master manifest.
 	attachCompatStream(r.Context(), session, playSession, source.FileID)
 	if playSession.Recipe != nil && playSession.Recipe.TranscodeNodeURL != "" {
+		if h.remoteCompatDenied(r.Context(), playSession) {
+			writeCompatSessionEnded(w)
+			return
+		}
 		var manifest []byte
 		local, relayErr := h.relayRemoteCompat(r.Context(), playSession, func(nodeURL string) error {
 			var err error
@@ -1168,6 +1179,10 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if playSession.Recipe != nil && playSession.Recipe.TranscodeNodeURL != "" {
+		if h.remoteCompatDenied(r.Context(), playSession) {
+			writeCompatSessionEnded(w)
+			return
+		}
 		segmentName := chiURLParam(r, "segmentId") + "." + chiURLParam(r, "segmentContainer")
 		local, relayErr := h.relayRemoteCompat(r.Context(), playSession, func(nodeURL string) error {
 			return h.proxyRemoteCompatSegment(w, r, nodeURL, playSession.UpstreamSessionID, segmentName)
@@ -1396,6 +1411,33 @@ func writeCompatManifest(w http.ResponseWriter, manifest []byte, playSession *Pl
 	_, _ = w.Write(rewriteManifest(manifest, playSession.RouteItemID, playSession.ID, source.ID, compatHLSRoutePathSegment(source)))
 }
 
+// remoteCompatDenied reports whether the deny marker revokes the remote
+// transcode a relay is about to forward to. Every relay to a transcode node
+// checks it before it signs the request: the transport id, which is the
+// upstream playback session's, and the recipe's playback session when it
+// differs. A live node runtime that a failed stop left behind is thereby
+// never reached.
+func (h *PlaybackHandler) remoteCompatDenied(ctx context.Context, playSession *PlaybackSession) bool {
+	if h.StreamDeny == nil || playSession == nil {
+		return false
+	}
+	transportID := playSession.UpstreamSessionID
+	if h.StreamDeny.Denied(ctx, transportID) {
+		return true
+	}
+	if playSession.Recipe == nil {
+		return false
+	}
+	sessionID := playSession.Recipe.SessionID
+	return sessionID != "" && sessionID != transportID && h.StreamDeny.Denied(ctx, sessionID)
+}
+
+// writeCompatSessionEnded answers a relay request for a denied session: 410,
+// no media bytes.
+func writeCompatSessionEnded(w http.ResponseWriter) {
+	writeError(w, http.StatusGone, "PlaybackSessionEnded", "Playback session ended")
+}
+
 func (h *PlaybackHandler) fetchRemoteCompatManifest(ctx context.Context, nodeURL, upstreamSessionID string) ([]byte, error) {
 	target := nodepool.NodeEndpoint(nodeURL, "/transcode/"+url.PathEscape(upstreamSessionID)+"/master.m3u8")
 	query := url.Values{playback.SourceTimelineQueryParam: []string{"1"}}
@@ -1404,7 +1446,10 @@ func (h *PlaybackHandler) fetchRemoteCompatManifest(ctx context.Context, nodeURL
 	if err != nil {
 		return nil, err
 	}
-	if err := nodeauth.Sign(req, nodeURL, h.JWTSecret); err != nil {
+	if err := nodeauth.SignTranscode(req, nodeURL, h.NodeKeys); err != nil {
+		if transcodeproxy.NodeUnsignable(err) {
+			transcodeproxy.WarnNodeUnsignable(ctx, "jellycompat", nodeURL, err)
+		}
 		return nil, err
 	}
 	resp, err := transcodeproxy.DoNode(transcodeproxy.NodeClient(), req, nodeURL, "stream")
@@ -1415,6 +1460,9 @@ func (h *PlaybackHandler) fetchRemoteCompatManifest(ctx context.Context, nodeURL
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		if transcodeproxy.NodeRefusedRelay(resp.StatusCode) {
+			transcodeproxy.WarnNodeRefusedRelay(ctx, "jellycompat", nodeURL, resp.StatusCode, h.NodeKeys)
+		}
 		return nil, fmt.Errorf("remote manifest status %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -1422,8 +1470,8 @@ func (h *PlaybackHandler) fetchRemoteCompatManifest(ctx context.Context, nodeURL
 
 // proxyRemoteCompatSegment relays one segment from a transcode node and writes
 // the answer. When the node cannot be reached at all it writes nothing and
-// returns the error (see nodepool.IsConnectFailure), so the caller can
-// move the transcode and retry; every other outcome is written and returns nil.
+// returns the error (see nodepool.IsConnectFailure), so the caller can move
+// the transcode and retry; every other outcome is written and returns nil.
 func (h *PlaybackHandler) proxyRemoteCompatSegment(w http.ResponseWriter, r *http.Request, nodeURL, upstreamSessionID, segmentName string) error {
 	path := "/transcode/" + url.PathEscape(upstreamSessionID) + "/segment/" + url.PathEscape(segmentName)
 	target := nodepool.NodeEndpoint(nodeURL, path)
@@ -1432,7 +1480,14 @@ func (h *PlaybackHandler) proxyRemoteCompatSegment(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusInternalServerError, "ServerError", "Failed to build remote segment request")
 		return nil
 	}
-	if err := nodeauth.Sign(req, nodeURL, h.JWTSecret); err != nil {
+	if err := nodeauth.SignTranscode(req, nodeURL, h.NodeKeys); err != nil {
+		if transcodeproxy.NodeUnsignable(err) {
+			// Unavailable to this server, not moved off: a registry that is
+			// empty or stale here could sign for no node at all.
+			transcodeproxy.WarnNodeUnsignable(r.Context(), "jellycompat", nodeURL, err)
+			writeError(w, http.StatusBadGateway, "TranscodeUnavailable", "Remote transcode segment is unavailable")
+			return nil
+		}
 		writeError(w, http.StatusInternalServerError, "ServerError", "Failed to build remote segment request")
 		return nil
 	}
@@ -1447,6 +1502,11 @@ func (h *PlaybackHandler) proxyRemoteCompatSegment(w http.ResponseWriter, r *htt
 		return nil
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if transcodeproxy.NodeRefusedRelay(resp.StatusCode) {
+		transcodeproxy.WarnNodeRefusedRelay(r.Context(), "jellycompat", nodeURL, resp.StatusCode, h.NodeKeys)
+		writeError(w, http.StatusBadGateway, "TranscodeUnavailable", "Remote transcode segment is unavailable")
+		return nil
+	}
 	generation := resp.Header.Get(transcodeproxy.GenerationHeader)
 	transcodeproxy.CopyResponseHeaders(w.Header(), resp.Header)
 	sw := httpstream.NewRollingDeadlineWriter(w)
@@ -1462,7 +1522,7 @@ func (h *PlaybackHandler) proxyRemoteCompatSegment(w http.ResponseWriter, r *htt
 		return nil
 	}
 	if generation != "" && r.Method == http.MethodGet && sw.CompletedFullResponse(transcodeproxy.FullRepresentationSize(resp)) {
-		if err := transcodeproxy.Acknowledge(r.Context(), transcodeproxy.NodeClient(), nodepool.NodeEndpoint(nodeURL, ""), path, h.JWTSecret, generation); err != nil {
+		if err := transcodeproxy.Acknowledge(r.Context(), transcodeproxy.NodeClient(), nodepool.NodeEndpoint(nodeURL, ""), path, h.NodeKeys, generation); err != nil {
 			slog.WarnContext(r.Context(), "acknowledge Jellyfin-compatible transcode segment", "component", "jellycompat", "error", err, "playback_session_id", upstreamSessionID)
 		}
 	}
@@ -3913,7 +3973,27 @@ func (h *PlaybackHandler) restartCompatTranscodeForAudioSelection(
 	if err != nil {
 		return false, err
 	}
-	if err := h.startRemoteTranscode(context.WithoutCancel(ctx), playSession.ID, playSession.UpstreamSessionID, source, file, positionSeconds, upstreamSession.TranscodeNodeURL); err != nil {
+	// The player holds a keyframe-planned session's playlist, planned from the
+	// beginning. The node starts the replacement in a new output directory and
+	// plans only a run from the beginning, so restart from the recipe's start,
+	// as RecipeOpts keeps a local session's recipe: the node plans the same
+	// segments, and the player's next segment request restarts FFmpeg at the
+	// planned segment for its position once the from-start run has set the
+	// timeline (#4044). The recipe records whether the node planned: a session
+	// that kept FFmpeg's playlist, because the node couldn't plan it or
+	// predates the attestation, restarts at the position. A planned session's
+	// replacement must plan too: one that keeps FFmpeg's playlist, because the
+	// index has become unreadable or the plan can't be recorded, is stopped
+	// and the switch fails rather than serve segments the playlist doesn't
+	// list.
+	seekSeconds := positionSeconds
+	planned := false
+	if recipe := playSession.Recipe; recipe != nil && recipe.KeyframePlanned &&
+		recipe.SeekSeconds == 0 && recipe.StartSegmentNumber == 0 {
+		seekSeconds, planned = 0, true
+	}
+	if err := h.startRemoteTranscodeWithToneMapMode(context.WithoutCancel(ctx), playSession.ID, playSession.UpstreamSessionID,
+		source, file, seekSeconds, upstreamSession.TranscodeNodeURL, "", planned); err != nil {
 		if errors.Is(err, errRemoteStartAdoptedLocal) || errors.Is(err, errRemoteStartAdoptedRemote) {
 			return true, nil
 		}

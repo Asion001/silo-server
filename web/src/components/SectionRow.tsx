@@ -1,4 +1,5 @@
 import { memo, useCallback, useId, useMemo } from "react";
+import { CollectionsRow } from "@/components/CollectionsRow";
 import { ContinueWatchingRowCard } from "@/components/ContinueWatchingCard";
 import MediaCarousel, { type MediaCarouselWindowing } from "@/components/MediaCarousel";
 import SectionItemCard from "@/components/SectionItemCard";
@@ -14,6 +15,7 @@ import { useSectionTitle } from "@/lib/sectionTitle";
 import { useT } from "@/i18n";
 import {
   carouselCardWidthClasses,
+  squarePosterSize,
   shortcutLabel,
   WIDE_CAROUSEL_CARD_WIDTH_CLASSES,
 } from "@/lib/uiCustomization";
@@ -107,7 +109,11 @@ export default memo(function SectionRow({
   );
   const { prefs: overlayPrefs, quickActionMode } = useOverlayPrefs();
   const { cardPresentation } = useUICustomization();
-  const posterSize = cardPresentation.poster_size;
+  // A row of audiobooks draws its square covers a size down (squarePosterSize).
+  const posterSize =
+    section.items.length > 0 && section.items.every((it) => it.type === "audiobook")
+      ? squarePosterSize(cardPresentation.poster_size)
+      : cardPresentation.poster_size;
   const posterWidthClasses = carouselCardWidthClasses(posterSize);
   const isProgressRow = isProgressSectionType(section.section_type);
   // One spoiler lookup per row rather than one per card.
@@ -139,6 +145,7 @@ export default memo(function SectionRow({
   const sectionId = section.id;
   const handleNearEnd = useCallback(() => onNearEnd?.(sectionId), [onNearEnd, sectionId]);
 
+  if (section.collections?.length) return <CollectionsRow section={section} />;
   if (section.items.length === 0) return null;
 
   const headerActions = libraryId ? (
